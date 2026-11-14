@@ -121,23 +121,22 @@ jevdecide n5 acepto 0.99; firmar n5
 [ $rc -ne 0 ] && echo "$out" | grep -q "deshizo" && ok "notario: no firma a Jev en una puerta que una persona le quitó" || bad "notario veto: $out"
 
 # ── 4. consulta real (sdd-jev.mjs judge) contra un Jev falso ────────────────────────────────────────────────────
-cat > "$T/jev_falso.py" <<'PY'
-import json, os, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
-class H(BaseHTTPRequestHandler):
-    def do_POST(s):
-        body = json.loads(s.rfile.read(int(s.headers["Content-Length"])))
-        open(os.environ["VISTO"], "w").write(json.dumps(body))
-        opciones = list(body["questions"]["decision"]["criteria"])
-        elegida = os.environ.get("ELIGE", opciones[0])
-        p = {o: (0.93 if o == elegida else round(0.07 / max(1, len(opciones) - 1), 3)) for o in opciones}
-        r = json.dumps({"model": "jev-falso", "usage": {"input_tokens": 10},
-                        "answers": {"decision": {"type": "choice", "choice": elegida, "confidence": "high", "probabilities": p}}}).encode()
-        s.send_response(200); s.send_header("Content-Type", "application/json"); s.end_headers(); s.wfile.write(r)
-    def log_message(s, *a): pass
-srv = HTTPServer(("127.0.0.1", 0), H); print(srv.server_port, flush=True); srv.serve_forever()
-PY
-VISTO="$T/visto.json" python3 "$T/jev_falso.py" > "$T/puerto" & SRV=$!
+cat > "$T/jev_falso.mjs" <<'JS'
+// Jev falso en Node (no Python: en el runner macOS del CI el cortafuegos no deja recibir conexiones a un Python sin firmar)
+import http from "node:http"; import fs from "node:fs";
+const srv = http.createServer((req, res) => {
+  let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => {
+    const body = JSON.parse(b); fs.writeFileSync(process.env.VISTO, JSON.stringify(body));
+    const opciones = Object.keys(body.questions.decision.criteria);
+    const elegida = process.env.ELIGE || opciones[0];
+    const p = Object.fromEntries(opciones.map((o) => [o, o === elegida ? 0.93 : Math.round(0.07 / Math.max(1, opciones.length - 1) * 1000) / 1000]));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ model: "jev-falso", usage: { input_tokens: 10 }, answers: { decision: { type: "choice", choice: elegida, confidence: "high", probabilities: p } } }));
+  });
+});
+srv.listen(0, "127.0.0.1", () => console.log(srv.address().port));
+JS
+VISTO="$T/visto.json" node "$T/jev_falso.mjs" > "$T/puerto" & SRV=$!
 for _ in $(seq 50); do [ -s "$T/puerto" ] && break; sleep 0.1; done
 export SDD_JEV_URL="http://127.0.0.1:$(cat "$T/puerto")" TYPESAFE_API_KEY=prueba
 echo "{\"root\": \"$ROOT\"}" > "$HERMES_SDD_HOME/instalacion.json"

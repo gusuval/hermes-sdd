@@ -67,6 +67,10 @@ done
 # Lo que no está en git
 FASE=$(echo "$NOMBRE" | sed -nE 's/.*-([0-9]+)$/\1/p')
 if [ -n "$FASE" ] && [ -d "$G/extras/evidencias/FASE-$FASE" ]; then mkdir -p evidencias; cp -R "$G/extras/evidencias/FASE-$FASE" evidencias/; fi
+# La aceptación real captura DESPUÉS de los commits de código; la copia debe quedar igual de nueva que ellos aunque la
+# máquina sea lenta (en el CI los commits caían en un segundo posterior y el gate global daba las capturas por caducadas).
+# El cierre real vuelve a calcular veredictos y capturas de todas las FASEs: aquí, todas quedan recién capturadas.
+case "$NOMBRE" in aceptar*|cierre*) [ -d evidencias ] && find evidencias -type f -exec touch {} + ;; esac
 case "$NOMBRE" in
   plan*) Q=questions-plan-architect.md ;;  tareas*) Q=questions-task-generator.md ;;
   implementar*|cierre*) Q=questions-task-implementer.md ;;  *) Q="" ;;
