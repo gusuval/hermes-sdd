@@ -6,7 +6,8 @@
 #
 # 1. Copia el arnés a ~/.hermes/hermes-sdd/<versión>-<commit> (un directorio NUEVO por commit; disco interno: los repos
 #    pueden estar en un disco externo) y cambia el enlace «actual» de golpe (rename atómico). Deja las 3 últimas.
-# 2. Crea aprobadores.json (tú, con tu id de Telegram y tu usuario local) si no existe
+# 2. Crea aprobadores.json (tú, con tu id de Telegram y tu usuario local) si no existe; si ya existe, le añade los
+#    canales que falten (dashboard y el id de Telegram de .env)
 # 3. Instala y activa el plugin de Telegram (solo si cambió)
 # 4. Perfiles sdd-estacion y sdd-ejecutor LIMPIOS: sin clonar tus tokens, solo la clave del modelo, permisos mínimos y
 #    plazos largos (una etapa dura 10-30 min). Se crean si no existen y NUNCA se borran: cada ajuste se escribe solo si
@@ -118,8 +119,8 @@ for v in $VIEJAS; do
   rm -rf "$v" && echo "· Versión vieja borrada: $(basename "$v")"
 done
 
+TG=$(grep '^TELEGRAM_ALLOWED_USERS=' "$HH/.env" 2>/dev/null | cut -d= -f2- | cut -d, -f1 | tr -d ' "' || true)
 if [ ! -f "$HOME_SDD/aprobadores.json" ]; then
-  TG=$(grep '^TELEGRAM_ALLOWED_USERS=' "$HH/.env" 2>/dev/null | cut -d= -f2- | cut -d, -f1 | tr -d ' "' || true)
   jq -n --arg n "$(git config user.name || echo "$USER")" --arg tg "$TG" --arg u "$USER" \
     '{yo: {nombre:$n, rol:"Cliente", canales: ({local:$u, dashboard:$u} + (if $tg != "" then {telegram:$tg} else {} end))}}' \
     > "$HOME_SDD/aprobadores.json"
@@ -130,6 +131,15 @@ if jq -e --arg u "$USER" 'any(.[]; .canales.local == $u and (.canales.dashboard 
   t=$(mktemp); jq --arg u "$USER" 'map_values(if .canales.local == $u and (.canales.dashboard // "") == "" then .canales.dashboard = $u else . end)' \
     "$HOME_SDD/aprobadores.json" > "$t" && mv "$t" "$HOME_SDD/aprobadores.json"
   echo "· aprobadores.json: canal dashboard añadido para el usuario local $USER"
+fi
+# Canal telegram: si Telegram se configuró después de crear aprobadores.json, el usuario local recibe el id de .env
+# (solo si le falta y nadie más tiene ya ese id; un id puesto a mano no se pisa)
+if [ -n "$TG" ] && jq -e --arg u "$USER" --arg tg "$TG" \
+    'any(.[]; .canales.local == $u and (.canales.telegram // "") == "") and all(.[]; (.canales.telegram // "" | tostring) != $tg)' \
+    "$HOME_SDD/aprobadores.json" >/dev/null; then
+  t=$(mktemp); jq --arg u "$USER" --arg tg "$TG" 'map_values(if .canales.local == $u and (.canales.telegram // "") == "" then .canales.telegram = $tg else . end)' \
+    "$HOME_SDD/aprobadores.json" > "$t" && mv "$t" "$HOME_SDD/aprobadores.json"
+  echo "· aprobadores.json: id de Telegram añadido para el usuario local $USER"
 fi
 
 PLUGIN_CAMBIA=false

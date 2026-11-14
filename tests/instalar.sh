@@ -91,4 +91,15 @@ for i in 1 2 3 4; do mkdir -p "$H/0.0.$i"; touch -t "20200101010$i" "$H/0.0.$i";
 bash "$ROOT/instalar.sh" >/dev/null 2>&1
 n=$(find "$H" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*.[0-9]*' | wc -l | tr -d ' ')
 [ "$n" = 3 ] && [ -d "$(readlink "$H/actual")" ] && [ ! -d "$H/0.0.1" ] && ok "purga: quedan 3 versiones y la actual" || bad "purga: $n $(ls "$H")"
+
+# 5. Telegram configurado después de crear aprobadores.json: se añade el id al usuario local, sin pisar uno puesto a mano
+jq 'del(.yo.canales.telegram)' "$H/aprobadores.json" > "$T/a" && mv "$T/a" "$H/aprobadores.json"
+echo "TELEGRAM_ALLOWED_USERS=555, 666" >> "$HOME/.hermes/.env"
+o=$(bash "$ROOT/instalar.sh" 2>&1)
+[ "$(jq -r '.yo.canales.telegram' "$H/aprobadores.json")" = 555 ] && echo "$o" | grep -q "id de Telegram añadido" \
+  && ok "aprobadores.json existente: añade el id de Telegram de .env" || bad "telegram: $o $(cat "$H/aprobadores.json")"
+jq '.yo.canales.telegram = "777"' "$H/aprobadores.json" > "$T/a" && mv "$T/a" "$H/aprobadores.json"
+o=$(bash "$ROOT/instalar.sh" 2>&1)
+[ "$(jq -r '.yo.canales.telegram' "$H/aprobadores.json")" = 777 ] && ! echo "$o" | grep -q "id de Telegram añadido" \
+  && ok "un id de Telegram puesto a mano no se pisa" || bad "telegram a mano: $(cat "$H/aprobadores.json")"
 exit $fail
