@@ -53,18 +53,29 @@ Indicative for a ~10-requirement project (7 UC, 1-2 WF); scale with UC/WF count,
 
 Report the total as `metrics.test_chars` (`wc -c test/*.md`) in Persist Summary and add a highlight when a file exceeds its budget by more than 25 %.
 
+## Proportion (which documents this run writes)
+
+`pipeline-state.json` → `route.artifacts` (written by `sdd route --write`, `scripts/lib/route-rules.mjs` `decideArtifacts`) says which optional documents the project needs; read it before the Full Run Order and follow it:
+
+| Key | `make: false` means |
+|-----|---------------------|
+| `test-matrix` | skip Mode 2: no `test/TEST-MATRIX-UC-*.md`. The BDD scenarios and the tests named after the criteria are the test plan; boundary and state cases go as rows of TEST-PLAN §4 (one line each). Small projects (≤ 8 REQ-F, no complex state) never get matrices nobody cites. |
+| `perf-scenarios` | skip Mode 3: no `test/PERF-SCENARIOS.md`. It is written only when a REQ-NF is about speed or load; its measurement then lives in that REQ-NF's `Verification: measurement` line. |
+
+Without `route.artifacts` (a route written before it existed) or with a full route (`route --full`, `make: true`), write every document as below. Report the documents skipped, with the reason, in Persist Summary `highlights`. `/sdd-test-planner --mode 2` or `--mode 3` asked explicitly by a person always runs.
+
 ## Full Run Order
 
-1. Readiness gates (below) → index `spec/` (Reading Strategy).
+1. Readiness gates (below) → index `spec/` (Reading Strategy); read `route.artifacts` (Proportion).
 2. Mode 1 `TEST-PLAN.md` in the main thread; write §3 Design Decisions first — it is the convention contract the matrix subagents must not repeat.
-3. Mode 2 matrices: fan-out to subagents (see Mode 2). They run in the background.
+3. Mode 2 matrices (unless `route.artifacts.test-matrix.make` is `false`): fan-out to subagents (see Mode 2). They run in the background.
 4. **Mode 5 `E2E-SCENARIOS.md` is delegated too when it is the critical path** — more than 1 workflow, or more than 20
    expected scenarios: one subagent writes the Critical and Full tiers from the WF step lists and the §3 conventions
    (same launch rules as the matrices), while the main thread keeps the Smoke tier and the **field-inventory
    cross-validation**, which may stop for a user decision and therefore never leaves the main thread. Below that
    threshold, or with `--sequential`, Mode 5 stays in the main thread. (The critical path is the main thread's own
    writing; parallelising only the matrices does not shorten the stage.)
-5. Mode 3 `PERF-SCENARIOS.md` in the main thread while the agents run.
+5. Mode 3 `PERF-SCENARIOS.md` (unless `route.artifacts.perf-scenarios.make` is `false`) in the main thread while the agents run.
 6. Consolidate: agent summaries → TEST-PLAN §4 gaps / §10 metrics; Persist Summary; Handoff.
 
 ## Readiness Gates

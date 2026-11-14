@@ -64,6 +64,27 @@ Cuando la ruta salta `specifications-engineer`, los requisitos y sus criterios n
 - **El bucle de aceptación** enruta un criterio sin test a `implement-or-test` cuando no existe `spec/tests`, porque no hay escenario que escribir. Con `spec/tests`, un criterio sin escenario sigue siendo `spec-gap`.
 - **Las puertas** que dependían de etapas saltadas pasan a n/a: G1, G2, G5 y G6 de plan-architect, G0 de test-planner y G1, G3 y G4 de req-change.
 
+## Proporción: qué documentos escribe cada etapa
+
+Una etapa que corre escribe sus documentos núcleo; los extra, solo cuando el proyecto los necesita. Motivo (club,
+11/2026): ~144.000 palabras de documentos para 3.070 líneas de código, y `test/TEST-MATRIX-UC-*.md`,
+`PERF-SCENARIOS.md` y un `spec/TRACEABILITY-MATRIX.md` escrito a mano que nadie volvió a citar ni a mantener.
+`sdd route` lo decide con `decideArtifacts` (`scripts/lib/route-rules.mjs`) y `--write` lo guarda en
+`pipeline-state.json` → `route.artifacts`:
+
+| Documento | Se escribe cuando | Si no |
+|---|---|---|
+| `test/TEST-MATRIX-UC-*.md` (test-planner, modo 2) | más de 8 REQ-F o estado complejo | los escenarios BDD y los tests con `REQ-X-NNN ACn` son el plan de pruebas |
+| `test/PERF-SCENARIOS.md` (test-planner, modo 3) | hay un REQ-NF de rendimiento o carga (latencia, ms, segundos, p95, concurrencia…) | la medida vive en la línea `Verification: measurement` de ese REQ-NF |
+| `spec/TRACEABILITY-MATRIX.md` | siempre **generada**: `sdd trace matrix --out spec/TRACEABILITY-MATRIX.md` | nunca se escribe a mano |
+
+La ruta completa (`--full`) mantiene todos los documentos como siempre; solo la matriz de trazabilidad pasa a generada.
+Una ruta escrita antes de `route.artifacts` se lee como completa. `wiki/` no es del método: es la memoria del encargado
+(repositorio propio, ignorado por el del proyecto) y no cuenta como documentación del proyecto.
+
+Tras un cambio de requisitos, `sdd lint --stale` lista los documentos que siguen citando textos que `REQUIREMENTS.md`
+ya no dice o ids que no existen; `sdd-req-change` los actualiza o los marca «Desfasado por INT-…» (fase 7).
+
 ## Reevaluación
 
 Los requisitos cambian: aparecen pagos en una CLI, llega un segundo tipo de usuario. Por eso `sdd-req-change` vuelve a ejecutar `sdd route --json` tras cada ADD o MODIFY aprobado:

@@ -22,7 +22,7 @@ import { parseRequirements, parseNeeds } from "../sdd-jev.mjs";
 import { stackProfile } from "./git-log.mjs";
 import { appendEntry, projectLang, skipText, routeDecisionText } from "./journal.mjs";
 import {
-  FACTORS, OPTIONAL_STAGES, CORE_STAGES, evaluateFactors, computeFacts, decideRoute, savedMinutes, loadThresholds,
+  FACTORS, OPTIONAL_STAGES, CORE_STAGES, evaluateFactors, computeFacts, decideRoute, savedMinutes, loadThresholds, decideArtifacts,
 } from "./route-rules.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -221,15 +221,16 @@ export function runRoute(argv, { prog = "sdd" } = {}) {
     if (o.full) for (const k of OPTIONAL_STAGES) if (!stages[k].run || status(k) === "skipped") { stages[k] = { run: true, reason: "set by user: full pipeline" }; explicit.add(k); }
     for (const [k, run] of Object.entries(o.sets)) { stages[k] = { run, reason: "set by user" }; explicit.add(k); }
 
+    const artifacts = decideArtifacts(r.facts, r.factors, { full: Boolean(o.full) });
     const result = {
-      factors: r.factors, facts: r.facts, stages, doubts: r.doubts, escalations,
+      factors: r.factors, facts: r.facts, stages, artifacts, doubts: r.doubts, escalations,
       saved_minutes_estimate: savedMinutes(stages),
       source: r.source, thresholds: r.thresholds, reqHash: r.reqHash,
       ...(r.jev ? { jev: { model: r.jev.model, input_tokens: r.jev.tokens } } : {}),
     };
     if (o.write) {
       if (!st.exists) fail(`no pipeline-state.json at ${st.file} (run /sdd-setup first)`);
-      const route = { factors: r.factors, facts: r.facts, stages, doubts: r.doubts, escalations, confirmedBy: o.confirm || null, reqHash: r.reqHash };
+      const route = { factors: r.factors, facts: r.facts, stages, artifacts, doubts: r.doubts, escalations, confirmedBy: o.confirm || null, reqHash: r.reqHash };
       result.written = writeState(st.file, route, stages, explicit);
       result.journal = journalRoute(root, stages, result.written, o.confirm);
     }
@@ -267,6 +268,7 @@ function printHuman(r) {
   const f = r.facts;
   out(`facts: ${f.req_f} REQ-F, ${f.req_nf} REQ-NF, ${f.req_c} REQ-C, ${f.must} Must, ${f.needs} needs (${f.needs_out} out of scope), ` +
     `code ${f.has_code ? "yes" : "no"}, Stack Profile ${f.has_profile ? "yes" : "no"}`);
+  if (r.artifacts) out(`documents: ${Object.entries(r.artifacts).map(([k, v]) => `${k}=${v.make === true ? "make" : v.make === false ? "skip" : v.make}`).join(" ")}`);
   if (r.doubts.length) out(`doubts (treated as yes): ${r.doubts.join(", ")}`);
   if (r.escalations.length) out(`escalations (skipped before, needed now; run them or --set <stage>=run): ${r.escalations.join(", ")}`);
   if (r.written) {
