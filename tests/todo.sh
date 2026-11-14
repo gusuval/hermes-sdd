@@ -7,7 +7,7 @@ for t in tests/perfil-agents.sh tests/notario.sh tests/requisitos.sh tests/guard
   printf '%-28s ' "$t"
   if out=$(bash "$t" 2>&1); then echo "ok ($(echo "$out" | grep -c '^ok') casos)"; else echo FALLA; echo "$out" | grep -E 'FAIL|Error' | head -5; fail=1; fi
 done
-for s in git acceptance plan tasks route quotes floor; do
+for s in git acceptance plan tasks route quotes floor captures; do
   printf '%-28s ' "metodo/tests/$s"
   bash "metodo/tests/$s/run.sh" >/dev/null 2>&1 && echo ok || { echo FALLA; fail=1; }
 done

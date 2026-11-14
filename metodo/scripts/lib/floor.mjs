@@ -19,7 +19,7 @@
 //   F-04  coverage or security suppression added under code_paths + test_paths (`istanbul|c8|v8 ignore`,
 //         `pragma: no cover`, `:nocov:`, `nosemgrep`, `gitleaks:allow`, `Stryker disable`): warning.
 //   F-07  a gate of the SDD Stack Profile lowered against the base: literal_gate, acceptance_gate, adversarial_gate,
-//         floor_gate (enforce > warn > off), visual_evidence (required > warn > off), prove_it (enforce > warn > off).
+//         floor_gate (enforce > warn > off), visual_evidence and criterion_video (required > warn > off), prove_it (enforce > warn > off).
 //         Only keys written in the base count (a missing key there is no finding); a key removed from the tree takes
 //         its default. Error. Read with the CLI's parser (CLAUDE.md, else .claude/CLAUDE.md; fenced blocks skipped).
 //
@@ -60,6 +60,7 @@ export const GATES = {
   adversarial_gate: { order: ["off", "warn", "enforce"], dflt: "enforce" },
   floor_gate: { order: ["off", "warn", "enforce"], dflt: "enforce" },
   visual_evidence: { order: ["off", "warn", "required"], dflt: "required" },
+  criterion_video: { order: ["off", "warn", "required"], dflt: "warn" },
   prove_it: { order: ["off", "warn", "enforce"], dflt: "warn" },
 };
 

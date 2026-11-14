@@ -15,6 +15,7 @@ import {
 } from "./acceptance.mjs";
 import { parseRequirements, parseNeeds, checkNeedCoverage } from "../sdd-jev.mjs";
 import { lintQuotes, testPathsOf } from "./quotes.mjs";
+import { lintCaptures } from "./captures-lint.mjs";
 
 class Exit extends Error { constructor(code) { super(`exit ${code}`); this.code = code; } }
 let PROG = "sdd";
@@ -28,7 +29,7 @@ const VALUED = new Set(["repo", "junit", "junit-sha", "fase", "out", "report", "
   "result", "channel", "demo", "requirements", "decisions", "command", "extract", "attach",
   "category", "quote", "evidence", "verifier", "counter", "challenge", "challenges", "literal", "code", "file", "line", "base"]);
 const MULTI = new Set(["junit", "paths", "attach", "evidence"]);
-const FLAGS = new Set(["json", "md", "needs", "quotes", "reset", "no-out", "help", "remeasure", "allow-dirty", "open"]);
+const FLAGS = new Set(["json", "md", "needs", "quotes", "captures", "reset", "no-out", "help", "remeasure", "allow-dirty", "open"]);
 
 function parse(argv) {
   const o = { _: [], junit: [], paths: [], attach: [], evidence: [] };
@@ -107,6 +108,26 @@ function cmdLintQuotes(o) {
   return summary.errors ? 1 : 0;
 }
 
+// ------------------------------------------------------------------ lint --captures
+// Before the acceptance (scripts/lib/captures-lint.mjs): C-01 a capture right after an API check with no on-screen
+// assertion (error) · C-02 one image for more than 3 criteria, or named after another criterion (warning) · C-03 the
+// capture of a REQ-F criterion taken by a test whose title does not cite it (error) · C-04 an id cited in a test that
+// exists in no document (warning). Exit 1 on any error.
+function cmdLintCaptures(o) {
+  if (o._.length) usage(`unexpected argument ${o._[0]}`);
+  const root = rootOf(o);
+  const reqs = readReqs(root, o);
+  const scope = scopeFor(root, reqs, o.fase);
+  let ledger = null;
+  try { ledger = buildLedger({ ...o, "no-out": true }).ledger; } catch (e) { if (!(e instanceof Exit)) throw e; }
+  const r = lintCaptures({ root, reqs, scenarios: loadScenarios(root), ledger, scope: scope ? scope.set : null, testPaths: testPathsOf(root) });
+  const summary = { ...r.summary, ...(scope ? { fase: o.fase } : {}) };
+  if (o.json) { out(JSON.stringify({ findings: r.findings, summary }, null, 2)); return summary.errors ? 1 : 0; }
+  for (const f of r.findings) out(`${f.file}${f.line ? `:${f.line}` : ""} ${f.code} ${f.severity}${f.req ? ` ${f.req} AC${f.ac}` : ""} ${f.message}`);
+  out(`lint --captures: ${summary.capture_calls} capture call(s) in ${summary.test_files} test file(s) · ${summary.errors} error(s) · ${summary.warnings} warning(s)${scope ? ` · FASE ${o.fase}` : ""}`);
+  return summary.errors ? 1 : 0;
+}
+
 // ------------------------------------------------------------------ ledger
 function scopeFor(root, reqs, fase) {
   if (fase === undefined) return null;
@@ -177,7 +198,12 @@ function printLedger(ledger) {
   if (ledger.visual_evidence !== "off") {
     for (const r of ledger.requirements.filter((x) => x.in_scope && !["WAIVED", "DEPRECATED"].includes(x.verdict)))
       for (const c of (r.criteria || []).filter((x) => x.visual === "missing" && (x.state === "pass" || x.state === "unshown")))
-        out(`${ledger.visual_evidence === "required" ? "unshown" : "warning: no screenshot"} ${r.id} AC${c.n}: passes without a screenshot in ${ledger.evidence_dir}/ (${ROUTES.capture})`);
+        out(`${ledger.visual_evidence === "required" ? "unshown" : "warning: no screenshot"} ${r.id} AC${c.n}: passes without a screenshot in ${ledger.evidence_dir}/ (${ROUTES.capture})`
+          + [...(c.unbound_captures || []), ...(c.images_not_counted || [])].slice(0, 2).map((u) => `; ${u.ref} not counted: ${u.reason}`).join(""));
+    const noVideo = ledger.requirements.filter((x) => x.in_scope && !["WAIVED", "DEPRECATED"].includes(x.verdict))
+      .flatMap((r) => (r.criteria || []).filter((x) => x.video === "missing" && (x.state === "pass" || x.state === "unshown")).map((c) => `${r.id} AC${c.n}`));
+    if (ledger.criterion_video === "required") for (const k of noVideo) out(`unshown ${k}: its browser test records no video (criterion_video: required)`);
+    else if (noVideo.length) out(`warning: no video for ${noVideo.length} criteria whose browser test records none (${noVideo.slice(0, 5).join(", ")}${noVideo.length > 5 ? ", …" : ""}; criterion_video: ${ledger.criterion_video})`);
     for (const id of ledger.videos?.missing || []) out(`missing video ${id}: no video named with ${id} (${ROUTES.capture})`);
   }
   if (ledger.literal_gate && ledger.literal_gate !== "off") {
@@ -573,6 +599,11 @@ function cmdAdversarial(o) {
     n: c.n, text: c.text, scenarios: c.scenarios,
     tests: (c.tests || []).map((t) => ({ name: t.name, file: t.file || (looksLikeFile(t.classname) ? t.classname : null), status: t.status, fresh: t.fresh })),
     captures: [...new Set((c.evidence || []).flatMap((e) => (e.attachments || []).filter((a) => a.kind === "image" && a.present).map((a) => a.path)))],
+    // what the capture must show (the «Se ve» contract), the images that do show it, and those that do not count
+    ...(c.sees ? { sees: c.sees } : {}),
+    ...(c.shown_by ? { shown_by: c.shown_by } : {}),
+    ...(c.unbound_captures ? { unbound_captures: c.unbound_captures } : {}),
+    ...(c.videos?.length ? { videos: c.videos } : {}),
   });
   const reqView = (id, n) => {
     const r = byId.get(id), t = textOf.get(id);
@@ -758,7 +789,7 @@ export function runAcceptance(cmd, argv, { prog = "sdd" } = {}) {
   PROG = prog;
   try {
     const o = parse(argv);
-    if (cmd === "lint") return o.quotes ? cmdLintQuotes(o) : cmdLintNeeds(o);
+    if (cmd === "lint") return o.quotes ? cmdLintQuotes(o) : o.captures ? cmdLintCaptures(o) : cmdLintNeeds(o);
     if (cmd === "accept") return cmdAccept(o);
     if (cmd === "gate") return cmdGate(o);
     if (cmd === "loop") return cmdLoop(o);

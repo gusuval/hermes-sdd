@@ -345,8 +345,41 @@ export function evidenceSettings(root) {
   const prof = stackProfile(root);
   const v = String(prof.visual_evidence || "").trim().toLowerCase();
   const dir = String(prof.evidence_dir || "").trim().replace(/^\.\//, "").replace(/\/+$/, "") || DEFAULT_EVIDENCE_DIR;
-  return { visual: VISUAL_MODES.includes(v) ? v : "required", dir };
+  const cv = String(prof.criterion_video || "").trim().toLowerCase();
+  return { visual: VISUAL_MODES.includes(v) ? v : "required", dir, video: VISUAL_MODES.includes(cv) ? cv : "warn" };
 }
+
+/** The capture helper's sidecars (`captura(page, info, id, { ve })` writes AC-001-02.json next to AC-001-02.png):
+ *  { criterio, test, titulo, ve[], url, imagen, sha256 } per JSON file under the evidence dir, indexed by the image's
+ *  sha256 and by its path without extension. A JUnit attachment (a copy of the PNG) finds its sidecar by sha256. */
+export function scanSidecars(root, dir) {
+  const bySha = new Map(), byStem = new Map();
+  const walk = (d) => {
+    let entries;
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { if (!e.name.startsWith(".")) walk(p); continue; }
+      if (!e.isFile() || !/\.json$/i.test(e.name) || e.name === "manifest.json") continue;
+      let j;
+      try { j = JSON.parse(readFileSync(p, "utf8")); } catch { continue; }
+      if (!j || typeof j !== "object" || (!j.test && !j.criterio)) continue;
+      const sc = { file: toPosix(path.relative(root, p)), criterio: j.criterio ? String(j.criterio) : null, test: j.test ? String(j.test) : null,
+        titulo: j.titulo ? String(j.titulo) : null, ve: Array.isArray(j.ve) ? j.ve.map(String) : [], url: j.url || null, sha256: j.sha256 || null };
+      if (sc.sha256) bySha.set(sc.sha256, sc);
+      byStem.set(toPosix(path.relative(root, p)).replace(/\.json$/i, ""), sc);
+    }
+  };
+  walk(path.resolve(root, dir));
+  return { bySha, byStem };
+}
+const CRITERION_NAME = /(?:^|[^A-Za-z0-9])(?:AC[-_ ]\d{3,}[-_ ]\d{2,}|REQ[-_ ][A-Z]+[-_ ]\d+[-_ ]AC\d+)(?!\d)/i;
+/** Whether a test title is the one a sidecar names (its full title path, or its own title). */
+const sameTest = (name, sc) => Boolean(name) && [sc.test, sc.titulo].filter(Boolean)
+  .some((t) => name === t || name.endsWith(t) || t.endsWith(name));
+/** A test that drives a browser: it attaches images or videos, or lives in an e2e / Playwright suite. */
+const isE2E = (t) => (t.attachments || []).some((a) => a.kind === "image" || a.kind === "video")
+  || /(^|[\/\\.])e2e([\/\\.]|$)|playwright/i.test(`${t.file || ""} ${t.classname || ""} ${t.report || ""}`);
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
 const VIDEO_EXT = /\.(webm|mp4|mov|m4v|mkv)$/i;
@@ -623,6 +656,7 @@ export function evaluate(opts) {
   const recAtt = (r) => ({ attachments: recordAttachments(root, r.attachments, files), ...(r.dirty ? { dirty: true } : {}) });
   const settings = opts.visual ? { visual: opts.visual, dir: opts.evidenceDir || DEFAULT_EVIDENCE_DIR } : evidenceSettings(root);
   const visual = settings.visual;
+  const videoMode = opts.criterionVideo || settings.video || "warn";
   // Literal check (sdd lint --quotes): Q-02/Q-03 errors of the test files that name a criterion, unless a person
   // excepted the literal. Under enforce a passing criterion of a Must with a gap is `weakened`.
   const literal = opts.literal || literalGate(root);
@@ -642,6 +676,17 @@ export function evaluate(opts) {
   const captures = (reqId, n, scen) => evFiles
     .filter((f) => f.kind === "image" && (scen.some((s) => nameHasId(f.rel, s)) || nameHasId(f.rel, `${reqId}-AC${n}`)))
     .map((f) => { const fr = fileFresh(f); return { kind: "capture", ref: f.rel, fresh: fr.ok, ...(fr.why ? { stale_reason: fr.why } : {}), attachments: [describeFile(root, f.abs, files)] }; });
+  const sidecars = visual === "off" ? { bySha: new Map(), byStem: new Map() } : scanSidecars(root, settings.dir);
+  const sidecarOf = (a) => (a.sha256 && sidecars.bySha.get(a.sha256)) || sidecars.byStem.get(String(a.path).replace(/\.[^./]+$/, "")) || null;
+  /** Does image `a`, attached to a test bound to the criterion (ids: its scenario ids and REQ-F-NNN-ACn), show it? The
+   *  helper's sidecar says which criterion it was taken for; else a name that carries a criterion id must carry one of
+   *  these; a generic name (shot-1.png, test-finished-1.png) shows only the criterion of a test bound to nothing else. */
+  const imageShows = (a, ids, binds) => {
+    const sc = sidecarOf(a);
+    if (sc?.criterio) return ids.some((id) => nameHasId(sc.criterio, id)) || `its sidecar says it was taken for ${sc.criterio}`;
+    if (CRITERION_NAME.test(path.basename(String(a.path)))) return ids.some((id) => nameHasId(a.path, id)) || "it is named after another criterion";
+    return binds <= 1 || `a generic name in a test bound to ${binds} criteria`;
+  };
   /** Evidence that shows a criterion: a fresh passing test, a fresh capture or a fresh record, with an image present. */
   const shows = (e) => e.fresh !== false && (e.kind !== "test" || e.status === "pass") && (e.attachments || []).some((a) => a.kind === "image" && a.present);
   const untracked = g.untrackedPaths || [];
@@ -671,13 +716,19 @@ export function evaluate(opts) {
 
   // Tests bound to (req, n).
   const testsByCriterion = new Map(), unboundTests = [], unknownScenarios = new Set();
+  const bindingsOf = new Map(); // JUnit case → Set of `REQ#n` it binds to
+  const caseOf = new WeakMap(); // bound test entry → its JUnit case
   const addTest = (req, n, c, via) => {
     const k = `${req}#${n}`;
     if (!testsByCriterion.has(k)) testsByCriterion.set(k, []);
+    if (!bindingsOf.has(c)) bindingsOf.set(c, new Set());
+    bindingsOf.get(c).add(k);
     const jf = junitFresh.get(c.source) || { ok: true, why: null };
-    testsByCriterion.get(k).push({ name: c.name, classname: c.classname, file: c.file, status: c.status, message: c.message,
+    const entry = { name: c.name, classname: c.classname, file: c.file, status: c.status, message: c.message,
       via, fresh: jf.ok, stale_reason: jf.why, report: c.source ? rel(c.source) : null,
-      attachments: (c.attachments || []).map((a) => resolveAttachment(root, c.source, a, files)) });
+      attachments: (c.attachments || []).map((a) => resolveAttachment(root, c.source, a, files)) };
+    caseOf.set(entry, c);
+    testsByCriterion.get(k).push(entry);
   };
   for (const c of junit?.cases || []) {
     const keys = testKeys(`${c.classname || ""} ${c.name}`);
@@ -689,6 +740,18 @@ export function evaluate(opts) {
     }
     for (const ra of keys.reqAcs) { addTest(ra.req, ra.ac, c, `${ra.req} AC${ra.ac}`); bound = true; }
     if (!bound && (keys.scenarios.length || keys.reqAcs.length)) unboundTests.push(c.name);
+  }
+  // Every image a JUnit test attached, by sha256: a capture of the evidence dir that is a copy of one of them was taken
+  // by that test (club, REQ-F-008 AC4: AC-008-04.png came from a test.step of a test whose title cites other criteria).
+  const attachedBySha = new Map();
+  if (visual !== "off") for (const c of junit?.cases || []) {
+    for (const raw of c.attachments || []) {
+      const d = resolveAttachment(root, c.source, raw, files);
+      if (d.kind !== "image" || !d.present || !d.sha256) continue;
+      if (!attachedBySha.has(d.sha256)) attachedBySha.set(d.sha256, []);
+      attachedBySha.get(d.sha256).push({ path: d.path, name: c.name, keys: bindingsOf.get(c) || new Set(),
+        pass: c.status === "pass" && (junitFresh.get(c.source)?.ok ?? true) });
+    }
   }
 
   const recs = decisions.records;
@@ -732,7 +795,7 @@ export function evaluate(opts) {
       const text = req.criteria[i - 1] || null;
       const scen = [...(byCriterion.get(`${req.id}#${i}`) || []), ...(req.criteria.length ? [] : [...(byCriterion.get(`${req.id}#0`) || [])])];
       const tests = [...(testsByCriterion.get(`${req.id}#${i}`) || []), ...(req.criteria.length ? [] : (testsByCriterion.get(`${req.id}#0`) || []))];
-      const c = { n: i, text, scenarios: [...new Set(scen)], tests, records: [], state: "missing", evidence: [] };
+      const c = { n: i, text, sees: (req.sees || [])[i - 1] || null, scenarios: [...new Set(scen)], tests, records: [], state: "missing", evidence: [] };
       if (method === "test") {
         const live = tests.filter((t) => t.fresh && t.status !== "skip");
         if (live.some((t) => t.status === "fail" || t.status === "error")) c.state = "fail";
@@ -769,10 +832,62 @@ export function evaluate(opts) {
     }
     // Visual evidence (REQ-F): a criterion is shown to the customer only with a screenshot. `required` holds a passing
     // criterion without one as `unshown` (the requirement is not VERIFIED); `warn` reports it and keeps the state.
+    // An image shows the criterion when a passing bound test attached it (taken for this criterion: imageShows), when a
+    // capture of the evidence dir named after it was taken by such a test (its sidecar, or the same bytes attached
+    // under its name), or comes from a record; a capture taken by a test that does not cite the criterion does not
+    // count (`unbound_captures`). A name-bound capture nobody attached (minitest and other runners without
+    // attachments) keeps counting by its name (binding "name").
     if (req.type === "F" && visual !== "off") {
       for (const c of criteria) {
-        c.visual = c.evidence.some(shows) ? "shown" : "missing";
+        const k = `${req.id}#${c.n}`;
+        const ids = [...c.scenarios, `${req.id}-AC${c.n}`];
+        const passing = c.tests.filter((t) => t.fresh && t.status === "pass");
+        const shownBy = [], notCounted = [];
+        for (const t of passing) {
+          const binds = bindingsOf.get(caseOf.get(t))?.size ?? 1;
+          for (const a of t.attachments || []) {
+            if (a.kind !== "image" || !a.present) continue;
+            const why = imageShows(a, ids, binds);
+            if (why === true) shownBy.push(a.path); else notCounted.push({ ref: a.path, test: t.name, reason: why });
+          }
+        }
+        for (const e of c.evidence) {
+          if (e.kind === "capture") {
+            const a = e.attachments[0];
+            const sc = sidecarOf(a);
+            if (sc?.test) {
+              e.binding = "sidecar"; e.test = sc.test;
+              if (!passing.some((t) => sameTest(t.name, sc)))
+                e.unbound = c.tests.some((t) => sameTest(t.name, sc)) ? `taken by the test "${clip(sc.test)}", which does not pass`
+                  : `taken by the test "${clip(sc.test)}", whose title does not cite ${req.id} AC${c.n}`;
+            } else {
+              const same = ((a.sha256 && attachedBySha.get(a.sha256)) || []).filter((x) => ids.some((id) => nameHasId(x.path, id)));
+              e.binding = same.length ? "test" : "name";
+              if (same.length && !same.some((x) => x.pass && x.keys.has(k))) {
+                e.test = same[0].name;
+                e.unbound = same.some((x) => x.keys.has(k)) ? `attached by the test "${clip(same[0].name)}", which does not pass`
+                  : `attached by the test "${clip(same[0].name)}", whose title does not cite ${req.id} AC${c.n}`;
+              }
+            }
+            if (e.fresh !== false && !e.unbound && a.present) shownBy.push(a.path);
+          } else if (e.kind !== "test" && shows(e)) shownBy.push(...e.attachments.filter((a) => a.kind === "image" && a.present).map((a) => a.path));
+        }
+        c.shown_by = [...new Set(shownBy)];
+        const unbound = c.evidence.filter((e) => e.unbound).map((e) => ({ ref: e.ref, test: e.test, reason: e.unbound }));
+        if (unbound.length) c.unbound_captures = unbound;
+        // Images of its own tests that were not counted, said only when nothing shows the criterion (what to fix)
+        if (!c.shown_by.length && notCounted.length) c.images_not_counted = notCounted.slice(0, 5);
+        c.visual = c.shown_by.length ? "shown" : "missing";
         if (visual === "required" && c.state === "pass" && c.visual === "missing") c.state = "unshown";
+        // Video per criterion: every browser test bound to a REQ-F criterion records one (criterion → video index).
+        const e2e = c.tests.filter((t) => t.fresh && t.status !== "skip" && isE2E(t));
+        c.videos = [...new Set([
+          ...e2e.flatMap((t) => (t.attachments || []).filter((a) => a.kind === "video" && a.present).map((a) => a.path)),
+          ...evFiles.filter((f) => f.kind === "video" && ids.some((id) => nameHasId(f.rel, id)) && fileFresh(f).ok).map((f) => f.rel)])];
+        if (e2e.length && videoMode !== "off") {
+          c.video = c.videos.length ? "present" : "missing";
+          if (videoMode === "required" && visual === "required" && c.state === "pass" && c.video === "missing") c.state = "unshown";
+        }
       }
     }
     // Waiver: the latest current one; a Must waiver without reason, role and follow-up issue is not valid.
@@ -850,7 +965,7 @@ export function evaluate(opts) {
     junit: (junit?.files || []).map((f) => ({ path: rel(f.path), cases: f.cases.length, fresh: junitFresh.get(f.path).ok, stale_reason: junitFresh.get(f.path).why })),
     junit_sha: junitSha,
     spec_tests: specTests,
-    visual_evidence: visual, evidence_dir: settings.dir, videos, literal_gate: literal,
+    visual_evidence: visual, evidence_dir: settings.dir, videos, criterion_video: visual === "off" ? "off" : videoMode, literal_gate: literal,
     requirements, summary,
     fase_acceptances: faseAcceptances,
     stale_decisions: staleDecisions,
@@ -896,6 +1011,11 @@ export function summarize(list) {
     literal_gaps: list.filter((r) => r.verdict !== "DEPRECATED" && r.verdict !== "WAIVED")
       .flatMap((r) => r.criteria || []).filter((c) => (c.literal_gaps || []).length).length,
     weakened: list.flatMap((r) => r.criteria || []).filter((c) => c.state === "weakened").length,
+    // REQ-F criteria with a capture taken by a test that does not cite them (or does not pass): it does not show them.
+    unbound_captures: list.flatMap((r) => r.criteria || []).filter((c) => (c.unbound_captures || []).length).length,
+    // REQ-F criteria whose browser tests recorded no video (criterion_video: warn lists them, required holds them).
+    criteria_without_video: list.filter((r) => r.verdict !== "DEPRECATED" && r.verdict !== "WAIVED")
+      .flatMap((r) => r.criteria || []).filter((c) => c.video === "missing").length,
   };
 }
 
@@ -981,6 +1101,7 @@ function evidenceCell(r) {
 }
 /** First screenshot that shows the criterion (same rule as the ledger), or null. */
 function screenshotOf(c) {
+  if (Array.isArray(c.shown_by)) return c.shown_by[0] || null;
   for (const e of c.evidence) {
     if (e.fresh === false || (e.kind === "test" && e.status !== "pass")) continue;
     const a = (e.attachments || []).find((x) => x.kind === "image" && x.present);
@@ -1046,8 +1167,8 @@ export function renderReport(ledger) {
     o.push("", "## Visual evidence", "",
       `Rule \`visual_evidence: ${ledger.visual_evidence}\` · screenshots and videos under \`${ledger.evidence_dir || DEFAULT_EVIDENCE_DIR}/\` (not versioned; \`sdd accept pack --fase N\` bundles them). ${visualLine(ledger) || "Every functional criterion in scope is shown."}`, "");
     const rows = ledger.requirements.filter((r) => r.in_scope && r.verdict !== "DEPRECATED" && r.verdict !== "WAIVED")
-      .flatMap((r) => (r.criteria || []).filter((c) => c.visual).map((c) => `| ${r.id} | AC${c.n} | ${c.state} | ${cell(screenshotOf(c) || "none")} |`));
-    if (rows.length) o.push("| Requirement | Criterion | State | Screenshot |", "|---|---|---|---|", ...rows, "");
+      .flatMap((r) => (r.criteria || []).filter((c) => c.visual).map((c) => `| ${r.id} | AC${c.n} | ${c.state} | ${cell(screenshotOf(c) || "none")} | ${cell((c.videos || [])[0] || (c.video === "missing" ? "missing" : "—"))} | ${cell((c.unbound_captures || []).map((u) => `${u.ref}: ${u.reason}`).join("; ") || "—")} |`));
+    if (rows.length) o.push("| Requirement | Criterion | State | Screenshot | Video | Capture not counted |", "|---|---|---|---|---|---|", ...rows, "");
     if (ledger.videos) o.push(`Videos for FASE ${ledger.scope?.fase ?? "?"}: ${ledger.videos.required.map((id) => `${id} ${ledger.videos.missing.includes(id) ? "missing" : "present"}`).join(" · ")}.`);
   }
   if (literalLine(ledger)) {
