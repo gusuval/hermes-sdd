@@ -236,6 +236,17 @@ esac
 # (coches: 5 líneas de test por línea de código y 4 de los 9 minutos de la FASE-0 retocando asserts)
 [ "$GRAN" = fina ] && TESTS_G="" || TESTS_G=" TEST POLICY: one test per acceptance criterion, at the cheapest level that proves it (unit for logic, DOM for rendering; a real browser only for what needs it and for the demo journey); never test the same criterion at several levels; test each REQ-C constraint once, not in every FASE. Name each test with its 'REQ-X-NNN ACn' and assert the literal example values of the criterion from the first version, so no later pass is needed to align them."
 # Una sola FASE compacta: la aceptación de la FASE y la entrega van en una sola puerta (la de entrega, con la demo)
+revision_independiente() {  # ronda adversarial + hsdd_fidelidad de la FASE $FASE y, si encuentran algo, UNA pasada de arreglo
+  fidelidad
+  if hay_hallazgos && [ ! -f ".sdd/hermes/fidelidad-arreglo-$FASE" ]; then
+    # Una pasada de arreglo, una sola vez por implementación de la FASE; lo que quede llega a la persona en la puerta
+    claude_etapa task-implementer "/sdd-task-implementer --fase=$FASE — $ARNES An independent review of FASE-$FASE found tests or captures that do not prove their criterion, listed below. For each one, add a task to task/TASK-FASE-$FASE.md and fix it (one commit each): the test must do the criterion's GIVEN with its own data and actor, its WHEN, and assert its whole THEN with the exact text; the capture must show the screen where that THEN is visible. Each WRONG-CAPTURE (or capture finding) is a rule, not a single case: apply it to ALL the captures of the FASE, not only to the one cited, and run «sdd lint --captures --fase ${FASE}» before you finish. Fix the code when it is the code that fails. A test that already existed when an earlier FASE was accepted is NOT edited: write an [OPEN] question in .sdd/questions-task-implementer.md instead. Findings: $(hallazgos)"
+    claude_etapa acceptance "/sdd-acceptance --fase $FASE — $ARNES Recompute the verdicts, captures and demo of FASE-$FASE after the fixes. Do not sign off."
+    fidelidad
+    touch ".sdd/hermes/fidelidad-arreglo-$FASE"   # hecha: si se cortaba a mitad, el reintento la repite
+  fi
+}
+
 unica() { [ -f .sdd/hermes/granularidad-plan ] && [ "$(cat .sdd/hermes/granularidad-plan)" != fina ] && [ "$(ls plan/fases/FASE-*.md 2>/dev/null | wc -l | tr -d ' ')" = 1 ] && ! git tag -l 'fase-*-accepted' | grep -q .; }
 
 no_hecho() {  # la explicación del ejecutor cuando termina sin hacer la etapa (su primer párrafo tras la línea stage=…)
@@ -514,6 +525,9 @@ PY
   cierre)
     if unica; then   # una sola FASE compacta: aquí se hacen sus veredictos y su demo (no hubo puerta de FASE)
       claude_etapa acceptance "/sdd-acceptance --fase 0 — $ARNES Produce the per-requirement verdicts with evidence and the FASE demo (captures and a short video in evidencias/FASE-0/). Do not sign off."
+      # La misma revisión independiente que una puerta de FASE: sin ella la ruta ligera entregaba sin que nadie mirara
+      # si los tests y las capturas prueban los criterios (taller, 14/11/2026: 0 impugnaciones porque no hubo ronda)
+      FASE=0; revision_independiente
     fi
     rc=0; node "$SDD" gate >/dev/null 2>&1 || rc=$?
     if [ "$rc" != 0 ] && [ "$rc" != 3 ]; then
