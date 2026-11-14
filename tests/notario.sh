@@ -241,6 +241,56 @@ puerta g10 requisitos; con_preguntas g10; decidir g10 acepto telegram 111 "Q1: B
 # 11. dar conformidad al plan con las recomendadas sigue siendo conformidad
 puerta g11 plan; con_preguntas g11; decidir g11 conforme telegram 111 "Q1: A, Q2: B"; firmar g11
 [ $rc -eq 0 ] && echo "$out" | grep -q "Plan conforme" && ok "con las recomendadas, el plan queda conforme" || bad "recomendadas: $out"
+# 12. las respuestas se leen frente a lo que enseñó la puerta: «De Q2 a Q3 lo recomendado» no es «Q2 = A» (antes la
+# regex lo leía así y convertía la conformidad en una petición de cambios) y una letra que no existe rechaza la decisión
+puerta g12 plan; con_preguntas g12; decidir g12 conforme telegram 111 "De Q2 a Q3 lo recomendado"; firmar g12
+[ $rc -eq 0 ] && echo "$out" | grep -q "Plan conforme" && ok "«De Q2 a Q3 lo recomendado» no se lee como una respuesta" || bad "De Q2 a Q3: $out"
+puerta g12b plan; con_preguntas g12b; decidir g12b conforme telegram 111 "Q1: D, Q2: B"; firmar g12b
+[ $rc -ne 0 ] && echo "$out" | grep -q "Q1: «D» no es una de sus opciones (A o B)" && ok "«Q1: D» con opciones A y B: rechazada con su motivo (antes se ignoraba)" || bad "Q1: D: $out"
+puerta g12c plan; con_preguntas g12c; decidir g12c conforme telegram 111 "Q7: A"; firmar g12c
+[ $rc -ne 0 ] && echo "$out" | grep -q "Q7 no existe" && ok "una pregunta que la puerta no tenía: rechazada" || bad "Q7: $out"
+# 13. efecto: editar-test → el notario registra la autorización (test-edit, con sus ficheros) y es lo único que
+# hsdd_fidelidad acepta; solo esos ficheros, y nunca si decide Jev
+mkdir -p tests; printf "it('a', () => { expect(1).toBe(1) })\n" > tests/a.test.js; printf "it('b', () => { expect(1).toBe(1) })\n" > tests/b.test.js
+git add tests; git commit -qm "test: a y b"; git tag fase-9-accepted
+cat > .sdd/questions-x.md <<'Q'
+## Q-x-030 [OPEN] skill=sdd-task-implementer
+Question: El literal de a.test.js cambió con REQ-F-001
+Para el cliente: ¿Actualizamos la prueba al texto nuevo que aprobaste?
+Options:
+  A) Sí, cambiar solo el literal (recommended)
+     efecto: editar-test tests/a.test.js
+  B) No
+     efecto: ninguno
+Answer:
+Q
+puerta g13 preguntas 9; decidir g13 respondo telegram 111; firmar g13
+[ $rc -eq 0 ] && jq -se '[.[] | select(.type == "test-edit")] | length == 1 and .[0].files == ["tests/a.test.js"] and .[0].question == "Q-x-030" and .[0].gate == "g13" and .[0].by == "Andrés León"' acceptance/decisions.jsonl >/dev/null \
+  && jq -e '.autorizaciones == [{pregunta:"Q-x-030", ficheros:["tests/a.test.js"]}]' "$HERMES_SDD_HOME/actas/local/g13.json" >/dev/null \
+  && git log -1 --format=%B | grep -q "Gate-Id: g13" && grep -q "Tests ya existentes que la persona autoriza editar.*tests/a.test.js" .sdd/hermes/respuestas-g13.json \
+  && ok "editar-test elegido por una persona: registro test-edit, acta del notario y commit" || bad "test-edit: $out $(tail -1 acceptance/decisions.jsonl)"
+printf "it('a', () => { expect(2).toBe(2) })\n" > tests/a.test.js; printf "it('b', () => { expect(2).toBe(2) })\n" > tests/b.test.js; git commit -qam "test: literales"
+o=$(python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" congelados "$R" --json)
+echo "$o" | jq -e '[.congelados[] | select(.asunto == "test: literales")] | (map(select(.fichero == "tests/a.test.js"))[0].autorizado) and (map(select(.fichero == "tests/b.test.js"))[0].autorizado | not)' >/dev/null \
+  && ok "hsdd_fidelidad: la respuesta firmada autoriza tests/a.test.js y no tests/b.test.js del mismo commit" || bad "fidelidad tras firmar: $o"
+cat > .sdd/questions-x.md <<'Q'
+## Q-x-031 [OPEN] skill=sdd-task-implementer
+Question: ¿Se edita b.test.js?
+Para el cliente: ¿Cambiamos esa prueba?
+Options:
+  A) Sí (recommended)
+     efecto: editar-test tests/b.test.js
+  B) No
+     efecto: ninguno
+Answer:
+Q
+puerta g13j preguntas 9; decidir g13j respondo telegram 111
+gemelo g13j; t=$(mktemp); jq '.decision.actor = {persona:"jev", canal:"jev", id:"x"}' "$HERMES_SDD_HOME/puertas/g13j.json" > "$t" && mv "$t" "$HERMES_SDD_HOME/puertas/g13j.json"
+jq '.actor = {persona:"jev", canal:"jev", id:"x"}' .sdd/hermes/decisiones/g13j.json > "$t" && mv "$t" .sdd/hermes/decisiones/g13j.json
+out=$(bash "$ROOT/firmar.sh" "$R" g13j 2>&1); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q "lo autoriza una persona, no Jev" && grep -q '^## Q-x-031 \[OPEN\]' .sdd/questions-x.md \
+  && ok "Jev no puede elegir una opción que autoriza editar tests (art. 12): rechazada sin contestar nada" || bad "jev editar-test: $out"
+rm -f .sdd/questions-x.md
 # ── fusión de la rama de la FASE en la rama por defecto al aceptarla (el notario; nunca push) ──────────────────────
 F="$T/fusion"; mkdir -p "$F"; cd "$F"; git init -q -b main; g() { git -c user.email=t@t -c user.name=t "$@"; }
 g commit -q --allow-empty -m base; git switch -q -c fase-0-base; echo a > a.txt; git add a.txt; g commit -qm "feat: a"
