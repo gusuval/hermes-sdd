@@ -288,7 +288,7 @@ git checkout -q -- .sdd/questions-x.md 2>/dev/null || true
 puerta g13 preguntas 9; decidir g13 respondo telegram 111; firmar g13
 [ $rc -eq 0 ] && jq -se '[.[] | select(.type == "test-edit")] | length == 1 and .[0].files == ["tests/a.test.js"] and .[0].question == "Q-x-030" and .[0].gate == "g13" and .[0].by == "Andrés León"' acceptance/decisions.jsonl >/dev/null \
   && jq -e '.autorizaciones == [{pregunta:"Q-x-030", ficheros:["tests/a.test.js"]}]' "$HERMES_SDD_HOME/actas/local/g13.json" >/dev/null \
-  && git log -1 --format=%B | grep -q "Gate-Id: g13" && grep -q "Tests ya existentes que la persona autoriza editar.*tests/a.test.js" .sdd/hermes/respuestas-g13.json \
+  && git log -1 --format=%B | grep -q "Gate-Id: g13" && git log -1 --format=%B > "$T/msg13" && node "$ROOT/metodo/scripts/sdd.mjs" verify --message "$T/msg13" >/dev/null 2>&1 && grep -q "Tests ya existentes que la persona autoriza editar.*tests/a.test.js" .sdd/hermes/respuestas-g13.json \
   && ok "editar-test elegido por una persona: registro test-edit, acta del notario y commit" || bad "test-edit: $out $(tail -1 acceptance/decisions.jsonl)"
 printf "it('a', () => { expect(2).toBe(2) })\n" > tests/a.test.js; printf "it('b', () => { expect(2).toBe(2) })\n" > tests/b.test.js; git commit -qam "test: literales"
 o=$(python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" congelados "$R" --json)

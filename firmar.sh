@@ -351,9 +351,11 @@ if ! hecho autorizado; then
         --reason "$(jq -r .motivo <<< "$A")" --by "$NOMBRE" --role "$ROL" >/dev/null || fallo "no se pudo registrar la autorización de $QID"
     done < <(jq -c '.autorizaciones[]' "$RJ")
     t=$(mktemp); jq --slurpfile r "$RJ" '.autorizaciones = [$r[0].autorizaciones[] | {pregunta, ficheros}]' "$ACTA" > "$t" && mv "$t" "$ACTA"
+    # Question-Id y no Refs: el hook commit-msg del proyecto solo admite ids de especificación en Refs (taller: el
+    # notario se quedaba a medias con «Refs `Q-acceptance-001` is not a spec id»)
     git add acceptance/decisions.jsonl
     git diff --cached --quiet || git commit -q -m "docs(acceptance): test edit authorized by $NOMBRE" \
-      --trailer "Refs: $(jq -r '[.autorizaciones[].pregunta] | join(", ")' "$RJ")" --trailer "Gate-Id: $GATE"
+      --trailer "Question-Id: $(jq -r '[.autorizaciones[].pregunta] | join(", ")' "$RJ")" --trailer "Gate-Id: $GATE"
   fi
   marcar autorizado
 fi
