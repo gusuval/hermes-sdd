@@ -124,7 +124,7 @@ def modelo_para(etapa: str, ejecutor: str = "claude") -> str:
 OPCIONALES_RUTA = [("specifications-engineer", "especificaciones"), ("spec-auditor", "auditoría de especificaciones"),
                    ("test-planner", "plan de pruebas"), ("security-auditor", "revisión de seguridad"),
                    ("tech-designer", "diseño técnico"), ("ux-designer", "diseño visual y de uso"),
-                   ("gap-detector", "huecos entre especificación y código")]
+                   ("gap-detector", "repaso de que el código hace todo lo especificado")]
 # Granularidad del plan: cuántas fases y lo gruesas que son las tareas. «auto»: compacta si el proyecto es pequeño.
 GRANULARIDADES = [("auto", "Según el tamaño del proyecto"), ("compacta", "Compacta: una fase y pocas tareas"),
                   ("normal", "Normal: una fase por recorrido"), ("fina", "Fina: fases y tareas pequeñas")]
@@ -136,7 +136,7 @@ RUTAS_DEFECTO = [
     {"id": "con-diseno", "nombre": "Con diseño", "etapas": ["tech-designer", "ux-designer"], "granularidad": "normal",
      "descripcion": "Lo esencial más el diseño visual y de uso y el diseño técnico. Para apps con pantallas cuidadas."},
     {"id": "completa", "nombre": "Completa", "etapas": [k for k, _ in OPCIONALES_RUTA], "granularidad": "fina",
-     "descripcion": "Todas las etapas del método: especificaciones, auditoría, plan de pruebas, seguridad, diseño y huecos. "
+     "descripcion": "Todas las etapas del método: especificaciones, auditoría, plan de pruebas, seguridad, diseño y repaso del código frente a la especificación. "
                     "Más lenta y más cara; para proyectos serios o de un cliente externo."},
 ]
 RUTA_DEFECTO = "adaptativa"
