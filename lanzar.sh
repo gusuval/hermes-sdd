@@ -282,14 +282,25 @@ case "$CMD" in
       done ;;
 
   reintentar)   # una etapa fallida se repite con una tarjeta NUEVA (nunca se desbloquea la vieja)
-    ETAPA=$3; FASE=${4:-}
+                # --de <tarjeta>: la vieja; sus hijas pasan a esperar a la nueva y la vieja se archiva (el gateway, cuando
+                # el kanban perdió al worker)
+    ETAPA=$3; FASE=""; DE=""; shift 3
+    while [ $# -gt 0 ]; do case "$1" in --de) DE=$2; shift 2 ;; *) FASE=$1; shift ;; esac; done
     # Si Hermes ya la está repitiendo (cada tarjeta tiene un reintento automático) o hay otra en cola, no se duplica:
     # dos a la vez chocan en el candado del repo (club, FASE-3: la vieja se reintentó sola y la nueva quedó «ocupada»)
     if "${K[@]}" list --json 2>/dev/null | jq -e --arg e "etapa.sh $REPO $ETAPA${FASE:+ $FASE}" \
         'any(.[]?; (.status == "running" or .status == "ready" or .status == "todo") and ((.body // "") | endswith($e)))' >/dev/null; then
       echo "ya hay una tarjeta de $ETAPA${FASE:+ $FASE} en marcha o en cola: no se duplica" >&2; exit 1
     fi
-    tarjeta "Reintento: $ETAPA${FASE:+ FASE-$FASE}" - 120m "$ETAPA" $FASE ;;
+    NUEVA=$(tarjeta "Reintento: $ETAPA${FASE:+ FASE-$FASE}" - 120m "$ETAPA" $FASE)
+    if [ -n "$DE" ]; then
+      for h in $("${K[@]}" show "$DE" --json 2>/dev/null | jq -r '.children[]?' 2>/dev/null); do
+        "${K[@]}" link "$NUEVA" "$h" >/dev/null 2>&1 && "${K[@]}" unlink "$DE" "$h" >/dev/null 2>&1 || true
+      done
+      "${K[@]}" comment "$DE" "Se repite en $NUEVA (el kanban perdió su worker)." >/dev/null 2>&1 || true
+      "${K[@]}" archive "$DE" >/dev/null 2>&1 || true
+    fi
+    echo "$NUEVA" ;;
 
-  *) echo "uso: lanzar.sh iniciar <repo> | siguiente <repo> <puerta> <resultado> | rehacer <repo> <N> | reintentar <repo> <etapa> [fase] | limpiar <repo>" >&2; exit 2 ;;
+  *) echo "uso: lanzar.sh iniciar <repo> | siguiente <repo> <puerta> <resultado> | rehacer <repo> <N> | reintentar <repo> <etapa> [fase] [--de <tarjeta>] | limpiar <repo> | esperar <repo> [--tag T] [--max S]" >&2; exit 2 ;;
 esac

@@ -55,4 +55,8 @@ o=$(bash "$ROOT/encargado.sh" reintentar "$R" t_1 2>&1) && bad "reintenta con un
 rm -f "$HERMES_SDD_HOME/puertas/g1.json"; touch .sdd/hermes/preparando; mkdir -p requirements; echo "1. algo" > requirements/REQUIREMENTS.md
 o=$(python3 "$ROOT/plugin/hermes-sdd/hsdd_proyectos.py" vigia "$R"); echo "$o" | grep -q "RESTOS" && bad "vigía: la entrada en preparación como restos" || ok "en preparación, la entrada sin commit no es «restos»"
 o=$(bash "$ROOT/encargado.sh" apartar "$R" 2>&1) && bad "aparta la entrada en preparación" || { [ -f requirements/REQUIREMENTS.md ] && ok "apartar en preparación: no (la entrada se queda)" || bad "apartó: $o"; }
+# 6. lanzar.sh reintentar --de (lo usa el gateway cuando el kanban pierde al worker): nueva, hijas a la nueva, vieja archivada
+: > "$T/log"; o=$(bash "$ROOT/lanzar.sh" reintentar "$R" implementar 2 --de t_1 2>&1)
+grep -q "create Reintento: implementar FASE-2" "$T/log" && grep -q "link $o t_2" "$T/log" && grep -q "unlink t_1 t_2" "$T/log" \
+  && grep -q "archive t_1" "$T/log" && ok "reintentar --de: tarjeta nueva ($o), la hija la espera y la vieja se archiva" || bad "reintentar --de: $o $(cat "$T/log")"
 exit $fail
