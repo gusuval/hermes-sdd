@@ -284,6 +284,26 @@ Gate-Id: $GATE" >/dev/null 2>&1; then
     FUSION=" (la rama $rama no se pudo fusionar en $def: hay conflictos; queda para una persona)"
   fi
 }
+feedback_implementar() {  # lo que recibe una implementación rechazada: texto, respuestas, criterios que no pasan, impugnaciones
+  local FASE=$1
+  mkdir -p .sdd/hermes/feedback
+  {
+    printf '%s\n' "$TEXTO"
+    respuestas lineas 2>/dev/null || true
+    node "$SDD" accept --fase "$FASE" --json 2>/dev/null | jq -r '
+      (.scope.requirements // []) as $s
+      | [.requirements[] | select(.verdict != "VERIFIED" and (($s | length) == 0 or (.id as $i | $s | index($i))))
+         | .id as $id | .criteria[]? | select(.state != "pass")
+         | "- \($id) AC\(.n // .index): \(.state)"
+           + (if ((.literal_gaps // []) | length) > 0 then " — el test no lleva la letra literal: " + ([.literal_gaps[].literal] | unique | join(", ")) else "" end)
+           + (if .visual == "missing" then " — falta su captura en evidencias/FASE-'"$FASE"'/" else "" end)]
+      | if length > 0 then "Criterios de la FASE que no pasan la aceptación (corrígelos todos):", .[] else empty end' || true
+    node "$SDD" accept challenge list --open --fase "$FASE" --json 2>/dev/null | jq -r '[.challenges[]? | select(.state == "open")
+      | "- \(.id) \(.req) AC\(.ac) [\(.category)]: «\(.quote)» — \((.evidence // []) | map(if type == "object" then (.path + (if .line then ":\(.line)" else "" end)) else tostring end) | join(", "))"]
+      | if length > 0 then "Hallazgos de la revisión independiente (el test o la captura no prueban el criterio):", .[] else empty end' 2>/dev/null || true
+  } > ".sdd/hermes/feedback/implementar-$FASE.txt"
+}
+
 commit_si_hay() {  # commit_si_hay <mensaje> <rutas...> — solo las que existen; no hace nada si no hay cambios
   local msg=$1 r; shift
   for r in "$@"; do [ -e "$r" ] && git add -- "$r"; done
@@ -457,22 +477,7 @@ Kanban-Task: $BOARD/$TASK"
   fase:rechazo)
     # Lo que recibe la implementación: el texto de la persona, sus respuestas a las preguntas de la puerta (con el
     # texto de la opción, no solo la letra) y los criterios de la FASE que no pasan. Un «A» suelto no es trabajo.
-    mkdir -p .sdd/hermes/feedback
-    {
-      printf '%s\n' "$TEXTO"
-      respuestas lineas 2>/dev/null || true
-      node "$SDD" accept --fase "$FASE" --json 2>/dev/null | jq -r '
-        (.scope.requirements // []) as $s
-        | [.requirements[] | select(.verdict != "VERIFIED" and (($s | length) == 0 or (.id as $i | $s | index($i))))
-           | .id as $id | .criteria[]? | select(.state != "pass")
-           | "- \($id) AC\(.n // .index): \(.state)"
-             + (if ((.literal_gaps // []) | length) > 0 then " — el test no lleva la letra literal: " + ([.literal_gaps[].literal] | unique | join(", ")) else "" end)
-             + (if .visual == "missing" then " — falta su captura en evidencias/FASE-'"$FASE"'/" else "" end)]
-        | if length > 0 then "Criterios de la FASE que no pasan la aceptación (corrígelos todos):", .[] else empty end' || true
-      node "$SDD" accept challenge list --open --fase "$FASE" --json 2>/dev/null | jq -r '[.challenges[]? | select(.state == "open")
-        | "- \(.id) \(.req) AC\(.ac) [\(.category)]: «\(.quote)» — \((.evidence // []) | map(if type == "object" then (.path + (if .line then ":\(.line)" else "" end)) else tostring end) | join(", "))"]
-        | if length > 0 then "Hallazgos de la revisión independiente (el test o la captura no prueban el criterio):", .[] else empty end' 2>/dev/null || true
-    } > ".sdd/hermes/feedback/implementar-$FASE.txt"
+    feedback_implementar "$FASE"
     if ! hecho registrado; then
       registrada ||
         node "$SDD" accept record fase-acceptance --fase "$FASE" --result rejected \
@@ -557,6 +562,9 @@ $(node "$SDD" gate --md 2>/dev/null)"
 
   entrega:rechazo)
     mkdir -p .sdd/hermes/feedback; printf '%s\n' "$TEXTO" > ".sdd/hermes/feedback/cierre.txt"
+    # Una sola FASE (la entrega es su puerta): rechazarla rehace la FASE-0 con lo pedido y las impugnaciones abiertas,
+    # como el rechazo de una FASE; antes solo se repetía el cierre, que no reprograma nada (taller, 14/11/2026)
+    if [ "$(p .unica)" = true ]; then feedback_implementar 0; fi
     if ! hecho registrado; then
       diario --stage acceptance --kind feedback --text "$TEXTO" --by "$NOMBRE ($ROL)" >/dev/null
       marcar registrado

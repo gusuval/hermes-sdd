@@ -122,4 +122,11 @@ mv "$T/task-bak" task
 # 8. la puerta de ruta ya no ofrece «método completo»: lleva a etapas que el arnés no tiene
 grep -q '"verbo":"completo"' "$ROOT/puerta.sh" && bad "la puerta de ruta ofrece «completo»" || ok "la puerta de ruta no ofrece «completo»"
 grep -q -- '--full' "$ROOT/firmar.sh" && bad "firmar.sh aún pasa --full" || ok "una puerta antigua con «completo» se firma como «acepto» (sin --full)"
+# 9. entrega de una sola FASE rechazada: se rehace la FASE-0 (implementar con lo pedido → cierre), no solo el cierre
+rm -f "$T/cartas"; echo compacta > .sdd/hermes/granularidad-plan; mkdir -p plan/fases; rm -f plan/fases/*.md; printf "# FASE-0\n" > plan/fases/FASE-0-TODO.md
+echo '{"tipo":"entrega","fase":"","unica":true}' > .sdd/hermes/puertas/ge.json
+bash "$ROOT/lanzar.sh" siguiente "$R" ge rechazo >/dev/null 2>&1
+o=$(cartas | cut -d'|' -f2,4 | tr '\n' ';')
+case "$o" in "Implementar FASE-0 (cambios)|$R implementar 0;Cierre: demo, puerta global y entrega|$R cierre"*) ok "entrega única rechazada: implementar la FASE-0 con lo pedido y cerrar otra vez" ;;
+  *) bad "entrega única rechazada: $o" ;; esac
 exit $fail

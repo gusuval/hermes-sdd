@@ -110,6 +110,9 @@ async def formulario_y_operacion():
     c = m._cabe(largo)
     ok(len(c) <= 4000 and c.startswith("📝 Requisitos") and c.endswith(pl["texto"].splitlines()[-1]) and "❓ Antes" in c and "✂️" in c,
        "un mensaje de más de 4000 caracteres se recorta por en medio: las preguntas y «esto lanzará» siguen")
+    sob = m._sobrante(largo)
+    ok(sob and "requisito 79" in sob and "❓" not in sob and "requisito 79" not in c and len(c) + len(sob) >= len(largo) - 200,
+       "lo que se recorta del medio se manda antes en su propio mensaje: no se pierde nada")
     # Estado y resumen con proyectos simulados
     async def falso_cli(*a, timeout=60):
         if a[:4] == ("hermes", "kanban", "boards", "list"):

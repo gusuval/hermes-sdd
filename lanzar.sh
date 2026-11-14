@@ -251,7 +251,9 @@ case "$CMD" in
       fase:descarto)                  bash "$ROOT/puerta.sh" "$REPO" fase "$FASE" ;;   # la misma puerta, sin lo descartado
       entrega:descarto)               bash "$ROOT/puerta.sh" "$REPO" entrega ;;
       entrega:acepto|entrega:observaciones) rm -f "$REPO/.sdd/hermes/mantenimiento/en-curso.txt"; echo "Proyecto entregado" ;;
-      entrega:rechazo)                tarjeta "Cierre (otra vez)" - 120m cierre ;;
+      entrega:rechazo)   # una sola FASE: se rehace (implementar con lo pedido → cierre); si no, solo el cierre
+        if [ "$(jq -r '.unica // false' "$P")" = true ]; then fase_n 0 " (cambios)" >/dev/null
+        else tarjeta "Cierre (otra vez)" - 120m cierre; fi ;;
       preguntas:respondo)             if [ -n "$FASE" ]; then fase_n "$FASE" " (respuestas)"; else mantener; fi ;;
       mantenimiento:cambio)   # se arregla sin cambiar el comportamiento y se entrega otra vez (no pasa por requisitos ni plan;
                               # si hiciera falta cambiar un requisito, la etapa lo pregunta)

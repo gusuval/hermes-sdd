@@ -203,8 +203,29 @@ def _render(puerta: dict):
     extra = "\n\n👀 Ya has visto la demo. Decide:" if (N.escalonada(puerta) and paso == 2) else ""
     jev = N.describir_jev(puerta)
     # «👉 … esto lanzará» con lo que la persona va marcando en los botones Q (no solo con las recomendadas)
+    return (_cabe(_texto_abierta(puerta, jev, extra)), _teclado(puerta, paso))
+
+
+def _texto_abierta(puerta: dict, jev: str = "", extra: str = "") -> str:
+    """El texto entero de una puerta abierta (sin recortar)."""
+    # «👉 … esto lanzará» con lo que la persona va marcando en los botones Q (no solo con las recomendadas)
     texto = TX.texto_con_lanzara(puerta, _respuestas(puerta))
-    return (_cabe(_cabecera(puerta) + "\n" + texto + (f"\n\n{jev}" if jev else "") + extra), _teclado(puerta, paso))
+    return _cabecera(puerta) + "\n" + texto + (f"\n\n{jev}" if jev else "") + extra
+
+
+def _sobrante(texto: str, n: int = 4000) -> str:
+    """Lo que _cabe quita del medio de un texto demasiado largo ("" si cabe): se manda antes, en su propio mensaje, para
+    que nada se pierda en Telegram (taller: «💬 Esto dirá la web» de la puerta de requisitos no cabía)."""
+    if len(texto) <= n:
+        return ""
+    corto = _cabe(texto, n)
+    corte = "\n\n✂️ (recortado: el texto entero está en el panel)"
+    k = corto.find(corte)
+    if k < 0:
+        return ""
+    cola = corto[k + len(corte):]
+    fin = len(texto) - len(cola) if cola else len(texto)
+    return texto[k:fin].strip()
 
 
 def _cabe(texto: str, n: int = 4000) -> str:
@@ -225,8 +246,15 @@ def _cabe(texto: str, n: int = 4000) -> str:
 
 async def _publicar(bot, puerta: dict) -> None:
     texto, teclado = _render(puerta)
+    sobra = ""
+    if puerta.get("estado") == "abierta":
+        sobra = _sobrante(_texto_abierta(puerta, N.describir_jev(puerta)))
     enviados = []
     for chat in _chats():
+        # Primero lo que no cabe en el mensaje de la puerta (sin botones), en trozos de 4000; luego la puerta
+        for i in range(0, len(sobra), 3900):
+            await bot.send_message(chat_id=int(chat), text=("📄 Detalle de la puerta (sigue abajo):\n" if i == 0 else "")
+                                   + sobra[i:i + 3900], disable_notification=True)
         m = await bot.send_message(chat_id=int(chat), text=texto[:4000], reply_markup=teclado,
                                    disable_notification=_en_silencio())
         enviados.append({"chat": m.chat_id, "msg": m.message_id})

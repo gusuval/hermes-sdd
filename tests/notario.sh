@@ -424,4 +424,10 @@ out=$(bash "$ROOT/decidir.sh" g18 deshacer 2>&1) && bad "deshace una puerta abie
 HERMES_SDD_DESHACER_S=45 bash "$ROOT/decidir.sh" --en config g18 conforme >/dev/null 2>&1
 jq -e --argjson t "$(date +%s)" '.firmar_en > $t + 30 and .firmar_en < $t + 60' "$f" >/dev/null && ok "--en config: la ventana de nuevo.sh config --deshacer" || bad "--en config: $(jq .firmar_en "$f")"
 out=$(bash "$ROOT/decidir.sh" g14 deshacer 2>&1) && bad "deshace una firmada" || ok "una puerta firmada no se deshace"
+# 19. entrega de una sola FASE rechazada: la implementación recibe lo pedido (feedback/implementar-0.txt), como el
+#     rechazo de una FASE; antes solo se apuntaba para el cierre, que no reprograma nada (taller)
+puerta g19 entrega; t=$(mktemp); jq '.unica = true' .sdd/hermes/puertas/g19.json > "$t" && mv "$t" .sdd/hermes/puertas/g19.json
+rm -f .sdd/hermes/feedback/implementar-0.txt; decidir g19 rechazo telegram 111 "faltan comprobar los duplicados"; firmar g19
+[ $rc -eq 0 ] && grep -q "faltan comprobar los duplicados" .sdd/hermes/feedback/implementar-0.txt 2>/dev/null \
+  && ok "rechazar la entrega de una FASE única deja lo pedido para rehacer la FASE-0" || bad "entrega única: $out"
 exit $fail
