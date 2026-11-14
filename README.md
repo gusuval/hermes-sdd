@@ -109,7 +109,9 @@ Qué deja instalado:
 - Dos perfiles de Hermes con permisos mínimos y sin tus tokens: `sdd-estacion`, que solo ejecuta etapas y no decide
   nada, y `sdd-ejecutor`, para etapas ligeras.
 
-Para actualizar: `git pull && bash instalar.sh`. Con etapas en marcha, usa `--sin-estacion`.
+Para actualizar: `git pull && bash instalar.sh`. Con trabajo en marcha (etapas, firmas o decisiones por firmar) no
+instala: `--esperar` espera a que acabe. Cada commit va a su propio directorio y `actual` cambia de golpe; nunca
+borra los perfiles ni reescribe un ajuste que no cambia (eso hacía que el kanban perdiera al worker en marcha).
 
 ### Windows
 
@@ -350,6 +352,9 @@ en un contenedor o una firma con llave física lo *impiden*.
 | `AVISO: kanban.auto_decompose está activo` | `hermes config set kanban.auto_decompose false` |
 | Las etapas tardan en arrancar (hasta un minuto entre tarjeta y tarjeta) | `hermes config set kanban.dispatch_interval_seconds 10` y `hermes gateway restart` (el instalador lo avisa) |
 | Una etapa sale «busy» | Ya hay otra etapa en marcha en ese repo: el arnés nunca ejecuta dos a la vez en el mismo proyecto. Espera a que termine. |
+| Una puerta queda en «error» (el notario no pudo firmar) | `bash ~/.hermes/hermes-sdd/actual/puerta.sh recuperar <id>`: si ya estaba validada, la firma sigue donde se quedó; si no, se deshace lo que dejó a medias y la puerta vuelve a abrirse. |
+| El kanban perdió una etapa («Kanban execution unknown», «managed worker lost») | El gateway la repite solo (dos veces como mucho con el mismo commit) y te avisa. |
+| Quieres vigilar una prueba sin mirar el tablero | `bash lanzar.sh esperar <repo> [--tag 'entrega-*']`: espera al siguiente evento (etapa terminada, puerta abierta o en error, tag) y lo dice en una línea. |
 | Una etapa sale «scheduled» | Se agotó la cuota de tu suscripción de Claude. Se reanuda sola a la hora de reinicio. |
 | La demo de una FASE no tiene capturas | Falta el navegador de Playwright en el proyecto: `npx playwright install chromium` (en Linux/WSL, con `--with-deps`). |
 | Windows: `$'\r': command not found`, lentitud, puertas que dejan de llegar… | Ver [docs/windows.md → Problemas frecuentes](docs/windows.md#problemas-frecuentes). |

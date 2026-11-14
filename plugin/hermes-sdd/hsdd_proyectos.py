@@ -574,6 +574,9 @@ def estado(repo: str, tablero: str | None = None, tarjetas: list | None = None) 
 ESPERA_PUERTA_H = (4, 24)       # una puerta abierta más de esto se menciona (en tramos: la salida no cambia cada tick)
 FIRMA_RETRASO_S = 600           # decidida y sin firmar 10 min después de su hora
 LENTA_MIN, LENTA_X = 30, 2      # en marcha más de 30 min y más del doble de su mediana
+LATIDO_MIN = (2, 10, 60)        # el bucle del gateway escribe latido.json cada 5 s: callado más de esto se menciona
+APARCADA_GRACIA_S = 300         # una etapa aparcada por la cuota que sigue así 5 min después de su reinicio
+SIN_DESPACHAR_S = 600           # una tarjeta «ready» que el kanban no toma en 10 min (sin nada en marcha en ningún tablero)
 
 
 def _etapa_de(t: dict) -> tuple:
@@ -618,6 +621,7 @@ def vigia(repo: str, tablero: str | None = None, tarjetas: list | None = None, a
         med = statistics.median(hechas[etapa]) if len(hechas.get(etapa, [])) >= 2 else None
         if mins > LENTA_MIN and med and mins > LENTA_X * max(med, 1):
             out.append(f"LENTA | {t.get('title')} ({t['id']}) | más del doble de lo normal ({round(med)} min)")
+    out += _vigia_kanban(tab, tarjetas or [], e, ahora)
     c = e.get("candado")
     if c and not c.get("vivo") and not any(t.get("status") == "running" for t in (tarjetas or [])):
         out.append(f"CANDADO HUÉRFANO | {c.get('run')} | la ejecución murió sin liberar el candado")
@@ -629,6 +633,53 @@ def vigia(repo: str, tablero: str | None = None, tarjetas: list | None = None, a
         n = len(sucio.splitlines())
         out.append(f"RESTOS SIN COMMIT | {n} fichero(s) | sin ninguna etapa en marcha")
     return out
+
+def _vigia_kanban(tab: str, tarjetas: list, e: dict, ahora: float) -> list:
+    """Lo que se atasca fuera de las etapas: el gateway callado, etapas aparcadas que nadie reanuda y tarjetas listas
+    que el kanban no despacha. Líneas estables (por tramos, sin horas)."""
+    out = []
+    lat = N.leer(N.HOME / "latido.json") or {}
+    if lat.get("ts"):
+        mins = (ahora - _ts(lat["ts"])) / 60
+        tramo = next((x for x in reversed(LATIDO_MIN) if mins >= x), None)
+        if tramo:
+            out.append(f"GATEWAY CALLADO | hermes-sdd | sin latido desde hace más de {tramo} min: no se publican ni firman puertas")
+    estacion = [t for t in tarjetas if t.get("assignee") == "sdd-estacion"]
+    cuota = N.leer(N.HOME / "cuota.json") or {}
+    if not e.get("pausado") and float(cuota.get("reset_at") or 0) + APARCADA_GRACIA_S < ahora:
+        for t in estacion:
+            if t.get("status") == "scheduled":
+                out.append(f"APARCADA SIN REANUDAR | {t.get('title')} ({t['id']}) | la cuota ya se renovó y sigue aparcada")
+    # «ready» desde cuándo: el kanban no lo dice; se apunta la primera vez que el vigía la ve así
+    f = N.HOME / "vigia" / f"{tab}.json"
+    vistas = N.leer(f, {}) or {}
+    listas = {t["id"]: t for t in estacion if t.get("status") == "ready"}
+    nuevas = {i: vistas.get(i, ahora) for i in listas}
+    if nuevas != vistas:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        N.escribir(f, nuevas)
+    viejas = [listas[i] for i, desde in nuevas.items() if ahora - desde >= SIN_DESPACHAR_S]
+    if viejas and not any(t.get("status") == "running" for t in tarjetas) and not _algo_en_marcha():
+        for t in viejas:
+            out.append(f"SIN DESPACHAR | {t.get('title')} ({t['id']}) | lista hace más de {SIN_DESPACHAR_S // 60} min y el kanban "
+                       "no la toma (¿gateway parado?)")
+    return out
+
+
+def _algo_en_marcha() -> bool:
+    """¿Hay alguna etapa en marcha en cualquier tablero? (kanban.max_in_progress = 1: una espera a otra, y no es fallo)"""
+    try:
+        tabs = json.loads(subprocess.run(["hermes", "kanban", "boards", "list", "--json"], capture_output=True, text=True,
+                                         timeout=60).stdout or "[]")
+        for b in tabs:
+            d = json.loads(subprocess.run(["hermes", "kanban", "--board", b["slug"], "list", "--json"], capture_output=True,
+                                          text=True, timeout=60).stdout or "[]")
+            if any(t.get("status") == "running" for t in (d if isinstance(d, list) else d.get("tasks", []))):
+                return True
+    except Exception:
+        return True   # sin poder mirarlo, no se acusa al kanban
+    return False
+
 
 # ── el encargado del proyecto (docs/encargado.md) ──────────────────────────────────────────────────────────────────
 def modelo_encargado(cfg: dict | None = None) -> str:

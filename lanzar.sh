@@ -7,6 +7,8 @@
 #   lanzar.sh cambio <repo> "<petición>"              un cambio o una funcionalidad nueva (también por /cambio)
 #   lanzar.sh adoptar <repo>                          un repo existente sin método: línea base desde el código
 #   lanzar.sh rehacer <repo> <N>                      vuelve a lanzar la FASE N: huecos (si quedan [PLAN GAP]) → implementar → aceptar
+#   lanzar.sh reintentar <repo> <etapa> [fase] [--de <tarjeta>]   repite una etapa con una tarjeta nueva
+#   lanzar.sh esperar <repo> [--tag T] [--max S]      bloquea hasta un evento (etapa terminada, puerta abierta…): una línea
 #
 # Cada tarjeta de etapa la toma el perfil sdd-estacion y ejecuta `etapa.sh`. Las puertas las abre la propia etapa
 # (puerta.sh) y las cierra el notario; después, este script crea el tramo siguiente:
@@ -301,6 +303,39 @@ case "$CMD" in
       "${K[@]}" archive "$DE" >/dev/null 2>&1 || true
     fi
     echo "$NUEVA" ;;
+
+  esperar)      # esperar <repo> [--tag T] [--max S]: bloquea hasta un evento del proyecto y lo dice en UNA línea.
+                # Para quien vigila una prueba (sustituye a un bucle hecho a mano):
+                #   ETAPA <etapa> [FASE-N] <resultado>: <resumen o motivo>   una etapa terminó (bien, mal, aparcada…)
+                #   PUERTA <id> <tipo> [FASE-N] abierta: <título>             se abrió una puerta
+                #   PUERTA <id> <tipo> [FASE-N] error: <motivo>               el notario no pudo firmarla
+                #   TAG <tag>                                                 existe el tag T (--tag; admite comodines)
+                #   TIEMPO                                                    S segundos sin nada (sale con 3)
+    shift 2; TAG=""; MAX=0
+    while [ $# -gt 0 ]; do
+      case "$1" in --tag) TAG=$2; shift 2 ;; --max) MAX=$2; shift 2 ;; *) echo "esperar: no entiendo «${1}»" >&2; exit 2 ;; esac
+    done
+    HS="${HERMES_SDD_HOME:-$HOME/.hermes/hermes-sdd}"; EJ="$REPO/.sdd/hermes/etapas.jsonl"
+    lineas() { if [ -f "$EJ" ]; then wc -l < "$EJ" | tr -d ' '; else echo 0; fi; }
+    puertas_repo() {  # «id estado» de las puertas de este repo
+      local f; for f in "$HS"/puertas/*.json; do [ -f "$f" ] && jq -r --arg r "$REPO" 'select(.repo == $r) | "\(.id) \(.estado)"' "$f" 2>/dev/null; done; return 0
+    }
+    N0=$(lineas); VISTAS=$(puertas_repo | sort); T0=$(date +%s)
+    while :; do
+      if [ "$(lineas)" -gt "$N0" ]; then
+        sed -n "$((N0 + 1))p" "$EJ" | jq -r '"ETAPA \(.etapa)\(if .fase then " FASE-\(.fase)" else "" end) \(.resultado): \(.resumen // .motivo // "")"'
+        exit 0
+      fi
+      NUEVA=$(comm -13 <(printf '%s\n' "$VISTAS") <(puertas_repo | sort) | grep -E ' (abierta|error)$' | head -1 || true)
+      if [ -n "$NUEVA" ]; then
+        jq -r --arg e "${NUEVA##* }" '"PUERTA \(.id) \(.tipo)\(if (.fase // "") != "" then " FASE-\(.fase)" else "" end) \($e): \(if $e == "error" then ((.error // "") | gsub("\n"; " ") | .[0:200]) else (.titulo // "") end)"' \
+          "$HS/puertas/${NUEVA%% *}.json"
+        exit 0
+      fi
+      if [ -n "$TAG" ]; then t=$(git -C "$REPO" tag -l "$TAG" | head -1); [ -z "$t" ] || { echo "TAG $t"; exit 0; }; fi
+      if [ "$MAX" -gt 0 ] && [ $(( $(date +%s) - T0 )) -ge "$MAX" ]; then echo TIEMPO; exit 3; fi
+      sleep "${HERMES_SDD_ESPERA_INTERVALO_S:-5}"
+    done ;;
 
   *) echo "uso: lanzar.sh iniciar <repo> | siguiente <repo> <puerta> <resultado> | rehacer <repo> <N> | reintentar <repo> <etapa> [fase] [--de <tarjeta>] | limpiar <repo> | esperar <repo> [--tag T] [--max S]" >&2; exit 2 ;;
 esac
