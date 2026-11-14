@@ -53,6 +53,9 @@ ETAPAS_MODELO = [("requisitos", "Requisitos"), ("ruta", "Ruta"),
                  ("pruebas", "Plan de pruebas"), ("seguridad", "Revisión de seguridad"), ("tecnico", "Diseño técnico"),
                  ("ux", "Diseño visual y de uso"), ("plan", "Plan"), ("tareas", "Tareas"),
                  ("huecos", "Completar huecos del plan"), ("implementar", "Implementar"), ("aceptar", "Aceptar"),
+                 # un sub-paso de aceptar: veredictos y re-veredictos (pocos turnos que ejecutan la CLI); la ronda
+                 # adversarial sigue con el modelo de «aceptar»
+                 ("aceptar-veredictos", "Aceptar: veredictos y demo"),
                  ("brechas", "Huecos entre especificación y código"),
                  ("cierre", "Cierre y entrega"), ("cambio", "Cambio de requisitos"), ("adoptar", "Adoptar un repo"),
                  # sin estar aquí, «modelo» no les daba ninguno y Claude usaba el suyo (Opus): aplicar respuestas y el
@@ -65,6 +68,10 @@ PERFILES = {
     "equilibrado": {e: ("opus" if e in _PIENSAN else "sonnet") for e, _ in ETAPAS_MODELO},
     "rapido": {e: "sonnet" for e, _ in ETAPAS_MODELO},
 }
+# Veredictos con el modelo barato de cada perfil (club: 9,47 $ de veredictos con Sonnet); el juicio (ronda adversarial,
+# implementador) no baja
+for _p, _m in (("calidad", "sonnet"), ("equilibrado", "haiku"), ("rapido", "haiku")):
+    PERFILES[_p]["aceptar-veredictos"] = _m
 NOMBRE_PERFIL = {"calidad": "Calidad: Opus en todo", "equilibrado": "Equilibrado: Opus planifica, Sonnet programa",
                  "rapido": "Rápido: Sonnet en todo"}
 PERFIL_DEFECTO = "equilibrado"

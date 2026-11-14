@@ -28,6 +28,8 @@ REPO=$(cd "$1" && pwd); ETAPA=$2; FASE=${3:-}
 cd "$REPO"
 T0=$(date +%s); HEAD0=$(git rev-parse HEAD 2>/dev/null || echo ""); EJECUCIONES='[]'   # para etapas.jsonl
 SUBPASO=""; S_LLM=0       # el último paso con ejecutor (dónde se quedó si se corta) y los segundos dentro de ejecutores
+RONDAS='[]'               # rondas adversariales de la etapa (aceptar): completa | incremental, criterios y verificados
+MODELO_PASO=""            # un sub-paso con otro modelo que el de la etapa (veredictos de aceptar: el barato del perfil)
 AL_TERMINAR=()            # «origen|destino»: lo consumido se marca solo si la etapa termina bien (un reintento lo vuelve a ver)
 . "$ROOT/lib/candado.sh"; CON_CANDADO=false
 # Ejecutor por etapa: .ejecutores[<etapa>] o, si no, .ejecutor (claude | hermes | replay); el modelo, en .modelos[<etapa>]
@@ -55,7 +57,7 @@ registrar_etapa() {  # una línea por etapa en .sdd/hermes/etapas.jsonl: la lín
   carga=$({ sysctl -n vm.loadavg 2>/dev/null || cut -d' ' -f1-3 /proc/loadavg 2>/dev/null; } | tr -d '{}' | awk '{printf "[%s,%s,%s]", $1, $2, $3}')
   jq -e . <<< "${carga:-x}" >/dev/null 2>&1 || carga=null
   jq -nc --argjson res "$(echo "$res" | jq -c . 2>/dev/null || echo '{}')" --argjson ej "$EJECUCIONES" --argjson r "$ratio" \
-    --arg sub "$SUBPASO" --argjson seg "$seg" --argjson sllm "$S_LLM" --argjson carga "$carga" \
+    --arg sub "$SUBPASO" --argjson seg "$seg" --argjson sllm "$S_LLM" --argjson carga "$carga" --argjson rondas "$RONDAS" \
     --arg etapa "$ETAPA" --arg fase "$FASE" --arg t "${HERMES_KANBAN_TASK:-}" --arg h0 "$HEAD0" --arg h1 "$head1" \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson min "$(( ($(date +%s) - T0) / 60 ))" --arg resumen "${2:-}" --arg puerta "${3:-}" '
     {ts: $ts, etapa: $etapa, fase: (if $fase == "" then null else $fase end), tarjeta: (if $t == "" then null else $t end),
@@ -64,7 +66,7 @@ registrar_etapa() {  # una línea por etapa en .sdd/hermes/etapas.jsonl: la lín
      ejecuciones: [$ej[] | .run], coste_usd: ([$ej[] | .cost_usd // 0] | add // 0), turnos: ([$ej[] | .turns // 0] | add // 0),
      head_antes: $h0, head_despues: $h1, tests_codigo: $r,
      subpaso: (if $sub == "" then null else $sub end), segundos: $seg, segundos_sin_llm: ([$seg - $sllm, 0] | max),
-     carga: $carga}' >> .sdd/hermes/etapas.jsonl 2>/dev/null || true
+     carga: $carga} + (if ($rondas | length) > 0 then {rondas_adversariales: $rondas} else {} end)' >> .sdd/hermes/etapas.jsonl 2>/dev/null || true
 }
 huerfanos() {  # servidores de este proyecto que dejó una ejecución (vite, el de las pruebas): ocupan el puerto y la
   # siguiente etapa se pelea con ellos (club, FASE-3: 30 min de e2e colgados hasta matarlos). Solo los de su node_modules
@@ -154,7 +156,7 @@ claude_etapa() {  # claude_etapa <clave-de-estado> <prompt>
   local sb=1; case "$ETAPA" in implementar|aceptar|cierre|brechas|adoptar|respuestas|mantener) sb=0 ;; esac
   SUBPASO=$clave
   local sal t1; sal=$(mktemp); t1=$(date +%s)
-  SDD_SANDBOX=$sb bash "$ROOT/executors/$EJEC.sh" "$REPO" "$ETAPA${FASE:+-$FASE}" "$2" "$(modelo "$ETAPA")" > "$sal" &
+  SDD_SANDBOX=$sb bash "$ROOT/executors/$EJEC.sh" "$REPO" "$ETAPA${FASE:+-$FASE}" "$2" "${MODELO_PASO:-$(modelo "$ETAPA")}" > "$sal" &
   wait $!   # en segundo plano y con wait: un TERM se atiende ya, no cuando acabe Claude
   res=$(tail -1 "$sal"); rm -f "$sal"
   S_LLM=$(( S_LLM + $(date +%s) - t1 ))
@@ -186,9 +188,35 @@ claude_etapa() {  # claude_etapa <clave-de-estado> <prompt>
 }
 puerta() { bash "$ROOT/puerta.sh" "$REPO" "$@"; }
 fidelidad() {  # ronda adversarial del método + hsdd_fidelidad de la FASE (deja .sdd/hermes/fidelidad-<N>.json)
-  claude_etapa acceptance "/sdd-acceptance --adversarial --fase $FASE — $ARNES Independent verifiers read each criterion of FASE-$FASE against production code, tests and captures: the GIVEN situation with its own data and actor, the WHEN, the whole THEN with its exact text, and whether each capture shows it (its «Se ve:» line says what must be on screen). One verifier is dedicated to captures and looks at EVERY capture of the FASE with the full table (criterion, «Se ve», image, test that took it), so that a wrong pattern is reported for all the captures it affects at once. Record confirmed or inconclusive findings with accept challenge add. Do not fix anything and do not sign off. Run the verifier and counter-verification agents in the foreground and wait for their answers in this same session: never schedule reminders, wake-ups, monitors or background waits (nobody will come back to this session), and close the acceptance stage state before you finish."
+  # Incremental (club: las rondas tras el arreglo y las de las re-aceptaciones fueron dos tercios del coste adversarial):
+  # si ya hubo una ronda de esta FASE (su plan queda en .sdd/hermes/adversarial-FASE-N.json), solo se re-verifican los
+  # criterios cuyo código, test, captura o texto cambió desde ella, o con una impugnación abierta; el resto conserva su
+  # veredicto adversarial. La primera ronda de cada FASE es completa (no hay plan anterior); "ronda_incremental": false
+  # en hermes-sdd.json las hace todas completas. Sin nada que re-verificar no se lanza ningún ejecutor.
+  local base=".sdd/hermes/adversarial-FASE-$FASE.json" plan=".sdd/hermes/adversarial-FASE-$FASE.ronda.json"
+  local tipo=completa n=null v=null inc="" coste=0
+  if [ -s "$base" ] && ! jq -e '.ronda_incremental == false' .sdd/hermes/hermes-sdd.json >/dev/null 2>&1 &&
+     node "$SDD" accept adversarial plan --fase "$FASE" --since "$base" --json > "$plan" 2>/dev/null && jq -e .incremental "$plan" >/dev/null 2>&1; then
+    tipo=incremental; n=$(jq .incremental.criteria "$plan"); v=$(jq .incremental.recheck "$plan")
+    inc=" INCREMENTAL ROUND: an adversarial round of FASE-$FASE already ran. Its plan is ready in $plan (made with \`accept adversarial plan --fase $FASE --since\`): use it instead of making a new one. Only the $v criteria with \"recheck\": true out of $n changed since that round (code, tests, captures or text) or have an open challenge (\"recheck_reasons\" says why): send ONLY those to the verifiers, ONLY their rows to the capture verifier, and take the clean-verdict sample among them. The other criteria keep their previous adversarial verdict: do not re-read them and do not report them as a coverage gap."
+  elif node "$SDD" accept adversarial plan --fase "$FASE" --json > "$plan" 2>/dev/null; then
+    n=$(jq '[.fases[].requirements[].criteria[]] | length' "$plan" 2>/dev/null || echo null); v=$n
+  else rm -f "$plan"; fi
+  if [ "$tipo" != incremental ] || [ "$v" != 0 ]; then
+    claude_etapa acceptance "/sdd-acceptance --adversarial --fase $FASE — $ARNES Independent verifiers read each criterion of FASE-$FASE against production code, tests and captures: the GIVEN situation with its own data and actor, the WHEN, the whole THEN with its exact text, and whether each capture shows it (its «Se ve:» line says what must be on screen). One verifier is dedicated to captures and looks at EVERY capture of the FASE with the full table (criterion, «Se ve», image, test that took it), so that a wrong pattern is reported for all the captures it affects at once. Record confirmed or inconclusive findings with accept challenge add. Do not fix anything and do not sign off. Run the verifier and counter-verification agents in the foreground and wait for their answers in this same session: never schedule reminders, wake-ups, monitors or background waits (nobody will come back to this session), and close the acceptance stage state before you finish.$inc"
+    coste=$(echo "$RES" | jq '.cost_usd // 0' 2>/dev/null || echo 0)
+  fi
+  # La ronda terminó (claude_etapa sale de la etapa si falla): su plan es la base de la siguiente
+  [ -s "$plan" ] && mv "$plan" "$base"
+  RONDAS=$(jq -c --arg t "$tipo" --argjson n "$n" --argjson v "$v" --argjson c "${coste:-0}" \
+    '. + [{tipo: $t, criterios: $n, verificados: $v, coste_usd: $c}]' <<< "$RONDAS")
   # Rápida (sin mutantes): decide si hace falta la pasada de arreglo. Los mutantes, una sola vez, antes de la puerta
   python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" --fase "$FASE" --sin-mutantes >/dev/null 2>&1 || jq -n '{graves: 1, error: "hsdd_fidelidad falló: no hay comprobación de fidelidad"}' > ".sdd/hermes/fidelidad-$FASE.json"   # un fallo no deja valer el JSON anterior
+}
+modelo_veredictos() {  # el del proyecto («aceptar-veredictos», si no el de aceptar); si no, el del perfil global
+  local m; m=$(jq -r '.modelos["aceptar-veredictos"] // .modelos.aceptar // .modelos.defecto // empty' .sdd/hermes/hermes-sdd.json 2>/dev/null)
+  [ -n "$m" ] && { echo "$m"; return; }
+  HERMES_SDD_HOME="${HERMES_SDD_HOME:-$HOME/.hermes/hermes-sdd}" python3 "$ROOT/plugin/hermes-sdd/hsdd_proyectos.py" modelo aceptar-veredictos "$EJEC" 2>/dev/null
 }
 hay_hallazgos() {  # impugnaciones abiertas sobre un Must o hallazgos graves de fidelidad
   [ "$(node "$SDD" accept challenge list --open --fase "$FASE" --json 2>/dev/null | jq -r '.must_open // ([.challenges[]? | select(.state == "open")] | length)')" != 0 ] && return 0
@@ -479,7 +507,10 @@ PY
 
   aceptar)
     [ -n "$FASE" ] || falla "falta la FASE"
-    claude_etapa acceptance "/sdd-acceptance --fase $FASE — $ARNES Produce the per-requirement verdicts with evidence and the FASE demo (captures and a short video in evidencias/FASE-$FASE/). Do not sign off."
+    # Veredictos y re-veredictos: pocos turnos que ejecutan la CLI, con el modelo barato del perfil (club: 9,47 $ con el
+    # de la etapa). La ronda adversarial y el implementador siguen con el de la etapa.
+    MV=$(modelo_veredictos)
+    MODELO_PASO=$MV claude_etapa acceptance "/sdd-acceptance --fase $FASE — $ARNES Produce the per-requirement verdicts with evidence and the FASE demo (captures and a short video in evidencias/FASE-$FASE/). Do not sign off."
     # ¿Los tests y las capturas prueban de verdad cada criterio? (sala: un e2e citaba REQ-F-003 AC3 y ejecutaba otro
     # escenario, con otra vivienda; capturas de otra semana; tests ya aceptados editados sin autorizar). Dos miradas:
     # la ronda adversarial del método (verificadores independientes: el GIVEN con sus datos, el THEN entero, las
@@ -488,7 +519,7 @@ PY
     if hay_hallazgos && [ ! -f ".sdd/hermes/fidelidad-arreglo-$FASE" ]; then
       # Una pasada de arreglo, una sola vez por implementación de la FASE; lo que quede llega a la persona en la puerta
       claude_etapa task-implementer "/sdd-task-implementer --fase=$FASE — $ARNES An independent review of FASE-$FASE found tests or captures that do not prove their criterion, listed below. For each one, add a task to task/TASK-FASE-$FASE.md and fix it (one commit each): the test must do the criterion's GIVEN with its own data and actor, its WHEN, and assert its whole THEN with the exact text; the capture must show the screen where that THEN is visible. Each WRONG-CAPTURE (or capture finding) is a rule, not a single case: apply it to ALL the captures of the FASE, not only to the one cited, and run «sdd lint --captures --fase ${FASE}» before you finish. Fix the code when it is the code that fails. A test that already existed when an earlier FASE was accepted is NOT edited: write an [OPEN] question in .sdd/questions-task-implementer.md instead. Findings: $(hallazgos)"
-      claude_etapa acceptance "/sdd-acceptance --fase $FASE — $ARNES Recompute the verdicts, captures and demo of FASE-$FASE after the fixes. Do not sign off."
+      MODELO_PASO=$MV claude_etapa acceptance "/sdd-acceptance --fase $FASE — $ARNES Recompute the verdicts, captures and demo of FASE-$FASE after the fixes. Do not sign off."
       fidelidad
       touch ".sdd/hermes/fidelidad-arreglo-$FASE"   # hecha: si se cortaba a mitad, el reintento la repite
     fi
