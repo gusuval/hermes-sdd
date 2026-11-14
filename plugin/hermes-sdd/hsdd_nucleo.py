@@ -120,26 +120,93 @@ class Rechazo(Exception):
     """La acción no procede; el mensaje se enseña tal cual a la persona."""
 
 
+# ── Estados de una puerta: un único camino para cambiarlos ────────────────────────────────────────────────────────
+# Todos los escritores del campo «estado» (canales, notario, decidir.sh, puerta.sh, lanzar.sh) pasan por aquí, con el
+# cerrojo: la CLI `hsdd_nucleo.py transicion` para los scripts, transicion() para el plugin.
+#   abierta  → decidida (un canal registra la decisión) | superada (otra puerta la sustituye)
+#   decidida → abierta (deshacer) | firmada | error (el notario no pudo firmar)
+#   error    → abierta (puerta.sh recuperar: no llegó a validarse) | firmada (el acta se reanudó y terminó)
+#   firmada  → firmada (repetir la firma es idempotente)            superada: final
+TRANSICIONES = {
+    "abierta": ("decidida", "superada"),
+    "decidida": ("abierta", "firmada", "error"),
+    "error": ("abierta", "firmada", "error"),
+    "firmada": ("firmada",),
+    "superada": (),
+}
+
+
+def _cambiar(puerta: dict, estado: str) -> dict:
+    """Valida y aplica el cambio de estado (con el cerrojo ya tomado). Lanza Rechazo si la tabla no lo permite."""
+    actual = puerta.get("estado") or "abierta"
+    if estado not in TRANSICIONES.get(actual, ()):
+        raise Rechazo(f"La puerta {puerta.get('id', '')} está «{actual}»: no puede pasar a «{estado}»")
+    puerta["estado"] = estado
+    return puerta
+
+
+def transicion(gid: str, estado: str, desde=None, **campos) -> dict:
+    """Cambia el estado de una puerta del índice según TRANSICIONES y actualiza campos (None borra el campo).
+    `desde`: estados de partida admitidos (además de la tabla). Devuelve la puerta actualizada."""
+    with cerrojo():
+        idx = indice(gid)
+        puerta = leer(idx)
+        if not puerta:
+            raise Rechazo(f"No conozco la puerta {gid}")
+        if desde and (puerta.get("estado") or "abierta") not in desde:
+            raise Rechazo(f"La puerta {gid} está «{puerta.get('estado')}», no {' ni '.join(desde)}")
+        _cambiar(puerta, estado)
+        for k, v in campos.items():
+            if v is None:
+                puerta.pop(k, None)
+            else:
+                puerta[k] = v
+        escribir(idx, puerta)
+        return puerta
+
+
+def superar(repo: str, tipo: str, fase: str, por: str, excepto: str = "") -> list:
+    """Una puerta nueva (o un cambio) sustituye a las abiertas del mismo proyecto, tipo y FASE: quedan «superadas»
+    (sin botones). Devuelve las superadas (quien llama archiva sus tarjetas)."""
+    hechas = []
+    with cerrojo():
+        for f in sorted((HOME / "puertas").glob("*.json")):
+            p = leer(f)
+            if not p or p.get("id") == excepto or p.get("estado") != "abierta":
+                continue
+            if p.get("repo") != repo or p.get("tipo") != tipo or str(p.get("fase") or "") != str(fase or ""):
+                continue
+            _cambiar(p, "superada")
+            p["superada_por"] = por
+            escribir(f, p)
+            hechas.append(p)
+    return hechas
+
+
 def _registrar(idx: Path, puerta: dict, verbo: str, texto: str, actor: dict, prueba: dict, ventana_s: int | None = None) -> dict:
     """Guarda la decisión normalizada (la lee el notario) y abre la ventana de deshacer. Con el cerrojo tomado."""
     # En una FASE o entrega bloqueada rechazar es la única salida: sus preguntas se contestan al rechazar
     if puerta.get("preguntas") and (verbo != "rechazo" or puerta.get("tipo") in ("fase", "entrega")):
-        resp = ", ".join(f"Q{n}: {l}" for n, l in respuestas(puerta).items() if l)
-        texto = f"{texto}. {resp}" if texto else resp
+        # El canal local (decidir.sh) escribe las respuestas en el texto («Q1: B»): esas no se repiten con la recomendada
+        ya = {n for n in re.findall(r"[Qq][A-Za-z]?\s*(\d+)\W{0,3}\s*[A-Ca-c]\b", texto or "")} if actor.get("canal") == "local" else set()
+        resp = ", ".join(f"Q{n}: {l}" for n, l in respuestas(puerta).items() if l and str(n) not in ya)
+        texto = (f"{texto}. {resp}" if texto else resp) if resp else texto
     decision = {"verbo": verbo, "texto": texto, "actor": actor, "prueba": prueba, "at": ahora()}
     dirdec = Path(puerta["repo"]) / ".sdd" / "hermes" / "decisiones"
     dirdec.mkdir(parents=True, exist_ok=True)
     escribir(dirdec / f"{puerta['id']}.json", decision)
     if puerta.get("ver_at"):
         decision["dwell_s"] = int(time.time() - puerta["ver_at"])
-    puerta.update(estado="decidida", decision=decision, firmar_en=time.time() + (ventana_s or deshacer_s()))
+    _cambiar(puerta, "decidida")
+    puerta.update(decision=decision, firmar_en=time.time() + (ventana_s or deshacer_s()))
     escribir(idx, puerta)
     return puerta
 
 
-def decidir(gid: str, verbo: str, texto: str, persona: str, canal: str, ident: str, prueba: dict) -> dict:
-    """Registra la decisión de `persona` (ya identificada por el canal) y abre la ventana de deshacer.
-    Devuelve la puerta actualizada. Lanza Rechazo si no procede."""
+def decidir(gid: str, verbo: str, texto: str, persona: str, canal: str, ident: str, prueba: dict,
+            ventana_s: int | None = None) -> dict:
+    """Registra la decisión de `persona` (ya identificada por el canal) y abre la ventana de deshacer (`ventana_s`, o la
+    configurada). Devuelve la puerta actualizada. Lanza Rechazo si no procede."""
     if canal == JEV:
         raise Rechazo("Jev decide solo con aplicar_jev")
     with cerrojo():
@@ -155,11 +222,14 @@ def decidir(gid: str, verbo: str, texto: str, persona: str, canal: str, ident: s
         if not opcion:
             raise Rechazo("Opción no válida")
         if opcion.get("paso", 1) == 2 and not puerta.get("ver_at"):
-            raise Rechazo("Mira la demo antes de decidir")
+            if canal != "local":
+                raise Rechazo("Mira la demo antes de decidir")
+            prueba = {**prueba, "demo": "no vista"}   # la persona está en la máquina: queda dicho que no la vio aquí
         texto = (texto or "").strip()
         if opcion.get("texto") and not texto:
             raise Rechazo(f"«{opcion['etiqueta']}» necesita un motivo")
-        return _registrar(idx, puerta, verbo, texto, {"persona": persona, "canal": canal, "id": str(ident)}, prueba)
+        return _registrar(idx, puerta, verbo, texto, {"persona": persona, "canal": canal, "id": str(ident)}, prueba,
+                          ventana_s=ventana_s)
 
 
 def deshacer(gid: str, persona: str) -> dict:
@@ -173,7 +243,7 @@ def deshacer(gid: str, persona: str) -> dict:
         if puerta.get("estado") != "decidida" or not persona or (dec.get("actor", {}).get("persona") != persona and not de_jev):
             raise Rechazo("Ya no se puede deshacer")
         (Path(puerta["repo"]) / ".sdd" / "hermes" / "decisiones" / f"{gid}.json").unlink(missing_ok=True)
-        puerta.update(estado="abierta")
+        _cambiar(puerta, "abierta")
         if de_jev:
             puerta["jev_vetado"] = {"por": persona, "at": ahora()}
         puerta.pop("decision", None)
@@ -437,35 +507,6 @@ def describir_jev(puerta: dict) -> str:
     return linea
 
 
-if __name__ == "__main__":   # CLI del notario y de jev.sh
-    import sys
-    a = sys.argv[1:]
-    try:
-        if a[:1] == ["permite-jev"]:      # permite-jev <puerta.json> <verbo> <p>: ¿vale una decisión de Jev?
-            puerta, verbo, p = leer(Path(a[1])) or {}, a[2], float(a[3] or 0)
-            # El veto (una persona deshizo a Jev) vive en el índice global, no en la copia del repo
-            global_ = (leer(indice(puerta["id"]), {}) or {}) if puerta.get("id") else {}
-            ok, motivo = puede_jev({**puerta, "jev_vetado": global_.get("jev_vetado")})
-            if ok and verbo not in verbos_jev(puerta):
-                ok, motivo = False, f"Jev no puede elegir «{verbo}»"
-            if ok and p < umbral_jev(modo_jev(puerta.get("tablero", ""))):
-                ok, motivo = False, f"p {p} por debajo del umbral"
-            print(f"{modo_jev(puerta.get('tablero', ''))}" if ok else motivo)
-            sys.exit(0 if ok else 1)
-        if a[:1] == ["rejuzgar"]:         # rejuzgar <puerta>
-            rejuzgar_jev(a[1]); print(f"El gateway volverá a preguntar a Jev por {a[1]} en unos segundos"); sys.exit(0)
-        if a[:1] == ["modo"]:             # modo [<modo> [<tablero>]]
-            if len(a) > 1:
-                poner_modo(a[1], a[2] if len(a) > 2 else None)
-            print(json.dumps(config_jev(), ensure_ascii=False, indent=2))
-            sys.exit(0)
-    except Rechazo as e:
-        print(e, file=sys.stderr)
-        sys.exit(2)
-    print("uso: hsdd_nucleo.py permite-jev <puerta.json> <verbo> <p> | modo [<modo> [<tablero>]]", file=sys.stderr)
-    sys.exit(2)
-
-
 def marcar(gid: str, **campos) -> dict:
     """Actualiza campos de presentación (ver_at, respuestas, telegram…) de una puerta."""
     with cerrojo():
@@ -509,3 +550,66 @@ def fichero_evidencia(puerta: dict, nombre: str) -> Path:
     if nombre not in evidencias(puerta):
         raise Rechazo("No existe esa evidencia")
     return Path(puerta["repo"]) / "evidencias" / f"FASE-{puerta.get('fase') or '0'}" / nombre
+
+
+if __name__ == "__main__":   # CLI del notario y de jev.sh
+    import sys
+    a = sys.argv[1:]
+    try:
+        if a[:1] == ["permite-jev"]:      # permite-jev <puerta.json> <verbo> <p>: ¿vale una decisión de Jev?
+            puerta, verbo, p = leer(Path(a[1])) or {}, a[2], float(a[3] or 0)
+            # El veto (una persona deshizo a Jev) vive en el índice global, no en la copia del repo
+            global_ = (leer(indice(puerta["id"]), {}) or {}) if puerta.get("id") else {}
+            ok, motivo = puede_jev({**puerta, "jev_vetado": global_.get("jev_vetado")})
+            if ok and verbo not in verbos_jev(puerta):
+                ok, motivo = False, f"Jev no puede elegir «{verbo}»"
+            if ok and p < umbral_jev(modo_jev(puerta.get("tablero", ""))):
+                ok, motivo = False, f"p {p} por debajo del umbral"
+            print(f"{modo_jev(puerta.get('tablero', ''))}" if ok else motivo)
+            sys.exit(0 if ok else 1)
+        if a[:1] == ["rejuzgar"]:         # rejuzgar <puerta>
+            rejuzgar_jev(a[1]); print(f"El gateway volverá a preguntar a Jev por {a[1]} en unos segundos"); sys.exit(0)
+        if a[:1] == ["transicion"]:       # transicion <puerta> <estado> [--desde a,b] [k=v | k:=json | -k]...
+            gid, estado, campos, desde = a[1], a[2], {}, None
+            resto = a[3:]
+            while resto:
+                x = resto.pop(0)
+                if x == "--desde":
+                    desde = resto.pop(0).split(",")
+                elif x.startswith("-"):
+                    campos[x[1:]] = None
+                elif ":=" in x:
+                    k, v = x.split(":=", 1); campos[k] = json.loads(v)
+                elif "=" in x:
+                    k, v = x.split("=", 1); campos[k] = v
+                else:
+                    raise Rechazo(f"campo no válido: {x}")
+            transicion(gid, estado, desde, **campos)
+            sys.exit(0)
+        if a[:1] == ["superar"]:          # superar <repo> <tipo> <fase|""> <por> [excepto]: imprime las tarjetas a archivar
+            for p in superar(a[1], a[2], a[3], a[4], a[5] if len(a) > 5 else ""):
+                if p.get("tarjeta"):
+                    print(p["tarjeta"])
+            sys.exit(0)
+        if a[:1] == ["decidir"]:          # decidir <puerta> <verbo> <texto> <canal> <id> [prueba-json]: lo que hace un canal
+            gid, verbo, texto, canal, ident = a[1:6]
+            persona = persona_de(canal, ident)[0]
+            if not persona:
+                raise Rechazo(f"{ident} no está en aprobadores.json con canal {canal}")
+            # decidir.sh firma en el acto (el gateway no firma el canal local): la ventana solo aparta al gateway
+            p = decidir(gid, verbo, texto, persona, canal, ident, json.loads(a[6]) if len(a) > 6 else {},
+                        ventana_s=86400 if canal == "local" else None)
+            print(json.dumps(p["decision"], ensure_ascii=False))
+            sys.exit(0)
+        if a[:1] == ["modo"]:             # modo [<modo> [<tablero>]]
+            if len(a) > 1:
+                poner_modo(a[1], a[2] if len(a) > 2 else None)
+            print(json.dumps(config_jev(), ensure_ascii=False, indent=2))
+            sys.exit(0)
+    except (Rechazo, ValueError) as e:
+        print(e, file=sys.stderr)
+        sys.exit(2)
+    print("uso: hsdd_nucleo.py permite-jev <puerta.json> <verbo> <p> | modo [<modo> [<tablero>]] | rejuzgar <puerta>\n"
+          "       | transicion <puerta> <estado> [--desde a,b] [k=v | k:=json | -k]... | superar <repo> <tipo> <fase> <por> [excepto]\n"
+          "       | decidir <puerta> <verbo> <texto> <canal> <id> [prueba-json]", file=sys.stderr)
+    sys.exit(2)

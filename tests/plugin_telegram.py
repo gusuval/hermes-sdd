@@ -167,7 +167,64 @@ async def firmada_fuera():
     ok(len(bot.editados) == 1 and bot.editados[0][1] is None and "Plan conforme" in bot.editados[0][0],
        f"firmada desde otro canal: el mensaje se pone al día y sin botones ({bot.editados})")
 
+async def reintentos():
+    # una etapa cuyo worker perdió el kanban se reintenta sola, dos veces como mucho por etapa, FASE y HEAD; con el
+    # candado del repo vivo, no (sigue en marcha)
+    llamadas = []
+    perdida = {"id": "t_p", "title": "Implementar FASE-2", "status": "blocked", "assignee": "sdd-estacion",
+               "last_failure_error": "Kanban execution unknown; retained by owner",
+               "body": f"Ejecuta: bash /x/etapa.sh {R} implementar 2"}
+    fallida = {**perdida, "id": "t_f", "title": "Aceptar FASE-2", "last_failure_error": "quedan tareas sin hacer",
+               "body": f"Ejecuta: bash /x/etapa.sh {R} aceptar 2"}
+    async def proyectos(): return {"demo": str(R)}
+    async def tarjetas(b): return [perdida, fallida]
+    async def cli(*a, timeout=60):
+        llamadas.append(a)
+        return "abc123\n" if a[:2] == ("git", "-C") else "t_nueva\n"
+    viejos = (m._proyectos, m._tarjetas, m._cli)
+    m._proyectos, m._tarjetas, m._cli = proyectos, tarjetas, cli
+    try:
+        b = Bot(); hechos = []
+        for _ in range(3):
+            hechos += await m._reintentar_perdidos(b)
+        lanz = [a for a in llamadas if a[:1] == ("bash",)]
+        ok(len(lanz) == 2 and all(a[2:] == ("reintentar", str(R), "implementar", "2", "--de", "t_p") for a in lanz),
+           f"worker perdido: se reintenta solo (con sus hijas), dos veces como mucho con el mismo HEAD ({len(lanz)} veces)")
+        ok(not any("aceptar" in a for a in lanz), "una etapa que falló por sí misma no se reintenta sola")
+        ok(any("lo repito solo" in t for t, _ in b.enviados), "y se avisa, sin ruido (sin sonido)")
+        llamadas.clear(); (HOME / "reintentos.json").unlink()
+        (R / ".sdd/hermes/lock").mkdir(parents=True, exist_ok=True); (R / ".sdd/hermes/lock/pid").write_text(str(os.getpid()))
+        await m._reintentar_perdidos(b)
+        ok(not [a for a in llamadas if a[:1] == ("bash",)], "con el candado del repo vivo no se reintenta (la etapa sigue)")
+        import shutil; shutil.rmtree(R / ".sdd/hermes/lock")
+    finally:
+        m._proyectos, m._tarjetas, m._cli = viejos
+
+async def puerta_rota():
+    # una puerta que falla en el bucle no impide atender a las demás; sin Telegram conectado, se sigue firmando
+    for f in HOME.glob("puertas/*.json"):
+        f.unlink()
+    (HOME / "puertas/r_1.json").write_text(json.dumps({"id": "r_1", "tipo": "plan", "estado": "abierta", "repo": str(R),
+                                                       "tablero": "demo", "titulo": "Plan"}))
+    (R / ".sdd/hermes/decisiones").mkdir(parents=True, exist_ok=True); (R / ".sdd/hermes/decisiones/r_2.json").write_text("{}")
+    (HOME / "puertas/r_2.json").write_text(json.dumps({"id": "r_2", "tipo": "plan", "estado": "decidida", "repo": str(R),
+        "tablero": "", "titulo": "Plan", "firmar_en": 0, "decision": {"actor": {"canal": "telegram"}}}))
+    async def roto(p): raise RuntimeError("kanban caído")
+    real = m._crear_tarjeta; m._crear_tarjeta = roto
+    app = m._RT["app"]; m._RT["app"] = None
+    async def nada(*a, **k): return []
+    reales = (m._limpiar_tableros, m._reintentar_perdidos); m._limpiar_tableros = nada; m._reintentar_perdidos = nada
+    m.log.disabled = True   # el error de r_1 se registra (con su traza): aquí no hace falta verlo
+    try:
+        await m._vuelta(1)
+    finally:
+        m.log.disabled = False
+        m._crear_tarjeta = real; m._RT["app"] = app; m._limpiar_tableros, m._reintentar_perdidos = reales
+    ok(json.loads((HOME / "puertas/r_2.json").read_text())["estado"] == "firmada",
+       "una puerta que falla no bloquea a las demás, y sin Telegram se firma igual")
+
 async def todo():
     await main(); await formulario_y_operacion(); await jev(); await superada(); await firmada_fuera()
+    await reintentos(); await puerta_rota()
 
 asyncio.run(todo()); sys.exit(1 if fallos else 0)

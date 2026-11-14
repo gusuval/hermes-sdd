@@ -45,8 +45,37 @@ h=$(date -r "$(jq -r .reset_at "$HERMES_SDD_HOME/cuota.json")" +%H:%M 2>/dev/nul
 [ "$(echo "$o" | jq -r .outcome)" = scheduled ] && [ "$h" = 18:00 ] && ok "límite semanal «resets 6pm» → se aparca hasta las 18:00" || bad "semanal: $o $h"
 rm -rf "$FB" "$SB" "$HERMES_SDD_HOME/cuota.json"
 
+# Candado por etapa y etapa cortada desde fuera (el kanban pierde al worker): consta como «interrumpida», mata a su
+# ejecutor y suelta el candado; lo que pidió la persona no se da por aplicado
+FB=$(mktemp -d); printf '#!/usr/bin/env bash\nsleep 60\n' > "$FB/claude"; chmod +x "$FB/claude"
+jq '.ejecutor="claude"' "$R/.sdd/hermes/hermes-sdd.json" > "$T/c" && cp "$T/c" "$R/.sdd/hermes/hermes-sdd.json"
+mkdir -p "$R/.sdd/hermes/feedback"; echo "otra FASE para el filtro" > "$R/.sdd/hermes/feedback/plan.txt"
+CLAUDE_BIN="$FB/claude" bash "$ROOT/etapa.sh" "$R" plan > "$T/etapa.out" 2>/dev/null &
+EP=$!
+for _ in $(seq 1 100); do pgrep -f "$FB/claude" >/dev/null && break; sleep 0.2; done
+[ "$(cat "$R/.sdd/hermes/lock/pid" 2>/dev/null)" = "$EP" ] && [ "$(cat "$R/.sdd/hermes/lock/quien")" = etapa ] \
+  && ok "la etapa tiene el candado del repo mientras dura (no solo cada ejecución de Claude)" || bad "candado: $(ls "$R/.sdd/hermes/lock" 2>&1)"
+# otra etapa a la vez: «busy», sin matar los servidores de la que corre
+mkdir -p "$R/node_modules/.bin"; printf '#!/usr/bin/env bash\nsleep 60\n' > "$R/node_modules/.bin/servidor"; chmod +x "$R/node_modules/.bin/servidor"
+"$R/node_modules/.bin/servidor" & SV=$!
+o=$(outcome ruta)
+[ "$(echo "$o" | jq -r .outcome)" = busy ] && kill -0 "$SV" 2>/dev/null && ok "otra etapa a la vez: busy, y no mata los servidores de la que está en marcha" || bad "busy: $o"
+{ kill "$SV"; wait "$SV"; } 2>/dev/null; rm -rf "$R/node_modules"
+kill -TERM "$EP"; for _ in $(seq 1 50); do kill -0 "$EP" 2>/dev/null || break; sleep 0.2; done
+u=$(tail -1 "$R/.sdd/hermes/etapas.jsonl")
+! kill -0 "$EP" 2>/dev/null && [ "$(echo "$u" | jq -r .resultado)" = interrumpida ] && [ "$(echo "$u" | jq -r .subpaso)" = plan-architect ] \
+  && echo "$u" | jq -e '(.segundos | type) == "number" and (.segundos_sin_llm | type) == "number"' >/dev/null \
+  && ok "TERM: la etapa queda en etapas.jsonl como interrumpida, con su sub-paso y sus segundos" || bad "interrumpida: $u"
+sleep 0.5; ! pgrep -f "$FB/claude" >/dev/null && [ ! -d "$R/.sdd/hermes/lock" ] \
+  && ok "TERM: el ejecutor muere con ella y el candado se suelta" || bad "restos: $(pgrep -fl "$FB/claude") $(ls "$R/.sdd/hermes" | tr '\n' ' ')"
+[ -s "$R/.sdd/hermes/feedback/plan.txt" ] && ok "TERM: lo que pidió la persona sigue pendiente para el reintento" || bad "feedback consumido"
+rm -f "$R/.sdd/hermes/feedback/plan.txt"; pkill -f "$FB/claude" 2>/dev/null; rm -rf "$FB"
+jq '.ejecutor="replay"' "$R/.sdd/hermes/hermes-sdd.json" > "$T/c" && cp "$T/c" "$R/.sdd/hermes/hermes-sdd.json"
+
 # Llegar a la FASE-0 aceptada y anularla
-paso() { local o p; o=$(outcome "$@" | tail -1); p=$(echo "$o" | jq -r '.puerta // empty'); [ -n "$p" ] && bash "$ROOT/decidir.sh" "$p" "${V:-acepto}" >/dev/null; }
+paso() { local o p v; o=$(outcome "$@" | tail -1); p=$(echo "$o" | jq -r '.puerta // empty'); [ -n "$p" ] || return 0
+  v=${V:-acepto}; [ "$1" = ruta ] && v=$(jq -r '[.opciones[] | select(.auto == true) | .verbo][0] // [.opciones[] | select(.verbo | startswith("ruta-")) | .verbo][0]' "$HERMES_SDD_HOME/puertas/$p.json")   # un botón que la puerta ofrece
+  bash "$ROOT/decidir.sh" "$p" "$v" >/dev/null; }
 paso requisitos; paso ruta; paso plan; V=conforme paso tareas; paso implementar 0; paso aceptar 0
 git -C "$R" rev-parse -q --verify refs/tags/fase-0-accepted >/dev/null && ok "FASE-0 aceptada" || bad "sin fase-0-accepted"
 bash "$ROOT/anular.sh" "$R" 0 yo telegram 999 "prueba" >/dev/null 2>&1 && bad "anuló con una identidad no autorizada" || ok "anular exige identidad autorizada"

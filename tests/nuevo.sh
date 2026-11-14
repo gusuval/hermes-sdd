@@ -31,6 +31,8 @@ R="$T/proyectos/bogota-turismo"
 [ $rc -eq 0 ] && [ -d "$R/.git" ] && ok "crea el proyecto en <carpeta por defecto>/<nombre sin tildes> ($R)" || bad "nuevo: $o"
 grep -q '^- stack: Astro + TypeScript + Vitest$' "$R/AGENTS.md" && grep -q '^- server: npx astro dev' "$R/AGENTS.md" && grep -q '^## SDD Stack Profile' "$R/AGENTS.md" \
   && ok "AGENTS.md con el Stack Profile del stack elegido" || bad "AGENTS.md: $(cat "$R/AGENTS.md")"
+grep -q '^- test_file: npx vitest run {file} --maxWorkers=2$' "$R/AGENTS.md" && grep -q 'maxWorkers: 2' "$R/AGENTS.md" \
+  && ok "Vitest con tope de workers (test_file y convención de vitest.config)" || bad "maxWorkers: $(grep -n vitest "$R/AGENTS.md")"
 grep -q '^> Una web para turistas que visitan Bogotá' "$R/intent/INT-001.md" && grep -q '^> Que se pueda leer bien en el móvil.$' "$R/intent/INT-001.md" \
   && ok "la petición literal, tal cual, en intent/INT-001.md" || bad "intent: $(cat "$R/intent/INT-001.md")"
 [ -z "$(git -C "$R" status --porcelain)" ] && [ "$(git -C "$R" rev-list --count HEAD)" = 2 ] && git -C "$R" log --format=%s | grep -q 'chore(sdd): set up hermes-sdd' \
@@ -133,6 +135,8 @@ PY2
 PR="python3 $ROOT/plugin/hermes-sdd/hsdd_proyectos.py"
 o=$($PR modelo requisitos)/$($PR modelo implementar)/$($PR modelo ruta hermes)
 [ "$o" = "opus/sonnet/anthropic/claude-sonnet-5.5" ] && ok "por defecto, Equilibrado: Opus planifica, Sonnet programa; la ruta con el id de Hermes" || bad "defecto: $o"
+o=$($PR modelo respuestas)/$($PR modelo mantener)
+[ "$o" = "sonnet/sonnet" ] && ok "aplicar respuestas y mantenimiento: con el modelo del perfil (no el de Claude por defecto)" || bad "respuestas: $o"
 o=$($PR modelos --perfil rapido 2>&1 | head -1); [ "$($PR modelo requisitos)" = sonnet ] && echo "$o" | grep -q "Rápido" && ok "perfil Rápido: Sonnet también en requisitos" || bad "rápido: $o"
 o=$(python3 - "$ROOT/plugin/hermes-sdd/hsdd_proyectos.py" <<'PY'
 import importlib.util, sys

@@ -29,6 +29,9 @@ if grep -lsq '"tipo": "mantenimiento"' .sdd/hermes/puertas/*.json 2>/dev/null; t
     case $e in abierta|decidida) echo "ya hay una puerta de mantenimiento abierta: $(basename "$f" .json)"; exit 0;; esac
   done
 fi
+# Con una etapa o una firma en marcha (candado del repo, lib/candado.sh) no se revisa: sus tests y sus commits son suyos
+. "$ROOT/lib/candado.sh"
+if candado_vivo "$REPO"; then echo "hay una ${CANDADO_QUIEN:-etapa} en marcha en este repo; se revisa otro día"; exit 0; fi
 [ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "el árbol tiene cambios sin commit; se revisa otro día"; exit 0; }
 
 HEAD7=$(git rev-parse --short=7 HEAD)

@@ -12,6 +12,45 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 SDD="$ROOT/metodo/scripts/sdd.mjs"
 HOME_SDD="${HERMES_SDD_HOME:-$HOME/.hermes/hermes-sdd}"
+
+# ── puerta.sh recuperar <puerta>: una puerta en «error» (el notario no terminó) ───────────────────────────────────────
+# · Si el acta consta como validada, la firma se reanuda donde se quedó (cada paso del notario es idempotente).
+# · Si no llegó a validarse, no se firmó nada: se deshace lo que dejara a medias en acceptance/ (lo no commiteado), se
+#   borra la decisión y la puerta vuelve a abrirse para decidirla otra vez (el canal la publica de nuevo).
+if [ "${1:-}" = recuperar ]; then
+  GATE=${2:?uso: puerta.sh recuperar <puerta>}
+  NUCLEO=(env HERMES_SDD_HOME="$HOME_SDD" python3 "$ROOT/plugin/hermes-sdd/hsdd_nucleo.py")
+  IDX="$HOME_SDD/puertas/$GATE.json"
+  [ -f "$IDX" ] || { echo "No conozco la puerta $GATE" >&2; exit 2; }
+  EST=$(jq -r '.estado // ""' "$IDX"); REPO=$(jq -r .repo "$IDX"); TAB=$(jq -r '.tablero // ""' "$IDX")
+  [ "$EST" = error ] || { echo "La puerta $GATE está «${EST}»: solo se recupera una puerta en error" >&2; exit 2; }
+  ACTA="$HOME_SDD/actas/${TAB:-local}/$GATE.json"
+  if jq -e '.pasos | index("validado")' "$ACTA" >/dev/null 2>&1; then
+    rc=0; OUT=$(bash "$ROOT/firmar.sh" "$REPO" "$GATE") || rc=$?
+    case "$rc" in
+      0)  "${NUCLEO[@]}" transicion "$GATE" firmada resultado="$(printf '%s\n' "$OUT" | tail -1)" -error
+          echo "Firma reanudada: $(printf '%s\n' "$OUT" | tail -1)" ;;
+      75) echo "El repo está ocupado (una etapa en marcha): vuelve a intentarlo cuando acabe" >&2; exit 75 ;;
+      *)  "${NUCLEO[@]}" transicion "$GATE" error error="la firma reanudada volvió a fallar" || true
+          echo "La firma reanudada volvió a fallar (mira $ACTA)" >&2; exit 1 ;;
+    esac
+    exit 0
+  fi
+  cd "$REPO"
+  . "$ROOT/lib/candado.sh"
+  candado_tomar "$REPO" firma "recuperar $GATE" || { echo "El repo está ocupado ($CANDADO_OTRO): vuelve a intentarlo cuando acabe" >&2; exit 75; }
+  trap candado_soltar EXIT
+  git checkout -q -- acceptance/ 2>/dev/null || true
+  git ls-files --error-unmatch acceptance/PENDIENTES.md >/dev/null 2>&1 || rm -f acceptance/PENDIENTES.md
+  rm -f ".sdd/hermes/decisiones/$GATE.json" "$ACTA"
+  "${NUCLEO[@]}" transicion "$GATE" abierta --desde error -decision -firmar_en -error -telegram -publicada -tg_vista
+  SHA=$(jq -r '.sha // ""' "$IDX")
+  echo "Puerta $GATE abierta otra vez: decide de nuevo (no se había firmado nada)"
+  [ "$(git rev-parse HEAD)" = "$SHA" ] ||
+    echo "  AVISO: el proyecto avanzó desde que se abrió (HEAD $(git rev-parse --short=7 HEAD), la puerta enseñaba ${SHA:0:7}): el notario no podrá firmarla; lo normal es relanzar la etapa que la abre" >&2
+  exit 0
+fi
+
 REPO=$(cd "$1" && pwd); TIPO=$2; FASE=${3:-}
 [ -n "${HERMES_SDD_SIN_KANBAN:-}" ] && BOARD="" || BOARD=${HERMES_KANBAN_BOARD:-$(basename "$REPO" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')}
 cd "$REPO"
@@ -187,16 +226,14 @@ jq -n --arg id "$ID" --arg t "$TIPO" --arg f "$FASE" --arg b "$BOARD" --arg s "$
   --argjson en "$(jq -c '{avisos, graves}' <<< "$ENC")" \
   '{id:$id, tipo:$t, fase:$f, tablero:$b, tarjeta:"", adopcion:$ad, sha:$s, creada:$c, repo:$r, titulo:$ti, texto:$tx,
     opciones:$o, demo:$v, preguntas:$q, hallazgos:$hz, tests_editados:$te, bloqueo:$bl, unica:$un,
-    revisar:(($rv // {}).revisar // []), encargado:$en, estado:"abierta"}' > ".sdd/hermes/puertas/$ID.json"
-# Una puerta nueva del mismo proyecto, tipo y FASE sustituye a la que siguiera abierta (club: reabrir la entrega dejaba
-# dos puertas de entrega abiertas a la vez): la vieja queda «superada» sin botones y su tarjeta se archiva
-for f in "$HOME_SDD"/puertas/*.json; do
-  [ -f "$f" ] || continue
-  jq -e --arg r "$REPO" --arg t "$TIPO" --arg n "$FASE" --arg id "$ID" \
-    '.repo == $r and .tipo == $t and ((.fase // "") | tostring) == $n and .estado == "abierta" and .id != $id' "$f" >/dev/null 2>&1 || continue
-  jq --arg g "$ID" '.estado = "superada" | .superada_por = $g' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-  tj=$(jq -r '.tarjeta // empty' "$f")
-  [ -n "$tj" ] && [ -n "$BOARD" ] && hermes kanban --board "$BOARD" archive "$tj" >/dev/null 2>&1 || true
+    revisar:(($rv // {}).revisar // []), encargado:$en}' > ".sdd/hermes/puertas/$ID.json"
+# La copia del repo es lo que se mostró (la lee el notario) y no lleva estado: el estado vive solo en el índice global
+# y solo cambia por las transiciones del núcleo (hsdd_nucleo.py transicion). Una puerta nueva del mismo proyecto, tipo y
+# FASE sustituye a la que siguiera abierta (club: reabrir la entrega dejaba dos puertas de entrega abiertas a la vez):
+# la vieja queda «superada» sin botones y su tarjeta se archiva
+for tj in $(HERMES_SDD_HOME="$HOME_SDD" python3 "$ROOT/plugin/hermes-sdd/hsdd_nucleo.py" superar "$REPO" "$TIPO" "$FASE" "$ID" "$ID"); do
+  [ -n "$BOARD" ] && hermes kanban --board "$BOARD" archive "$tj" >/dev/null 2>&1 || true
 done
-cp ".sdd/hermes/puertas/$ID.json" "$HOME_SDD/puertas/$ID.json"   # índice global para los canales
+jq '. + {estado: "abierta"}' ".sdd/hermes/puertas/$ID.json" > "$HOME_SDD/puertas/$ID.json.tmp" &&
+  mv "$HOME_SDD/puertas/$ID.json.tmp" "$HOME_SDD/puertas/$ID.json"   # índice global para los canales
 echo "$ID"

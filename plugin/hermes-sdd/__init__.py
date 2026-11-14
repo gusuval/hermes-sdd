@@ -37,6 +37,7 @@ def _path_cmds() -> str:
 
 
 PATH_CMDS = _path_cmds()
+OCUPADO = 75   # firmar.sh: el repo lo tiene una etapa u otra firma (lib/candado.sh); se reintenta, no es un error
 _RT: dict = {"app": None, "pendientes": {}}   # pendientes: id del mensaje ForceReply → (puerta, verbo, persona)
 
 
@@ -205,6 +206,8 @@ async def _publicar(bot, puerta: dict) -> None:
 
 
 async def _editar(bot, puerta: dict, texto: str, teclado=None) -> None:
+    if bot is None:
+        return
     for t in puerta.get("telegram", []):
         try:
             await bot.edit_message_text(chat_id=t["chat"], message_id=t["msg"], text=texto[:4000], reply_markup=teclado)
@@ -379,18 +382,28 @@ async def _firmar(bot, puerta: dict) -> None:
         out, err = await asyncio.wait_for(proc.communicate(), 600)
     except asyncio.TimeoutError:
         proc.kill(); out, err = b"", b"el notario no termino en 10 min"
-    idx = HOME / "puertas" / f"{gid}.json"
-    with N.cerrojo():
-        p = _leer(idx) or puerta
+    if proc.returncode == OCUPADO:   # una etapa (u otra firma) tiene el repo: se firma en cuanto lo suelte
+        log.info("hermes-sdd: %s: el repo está ocupado; se firma en la próxima vuelta", gid)
+        try:
+            N.marcar(gid, firmar_en=time.time() + 30)
+        except N.Rechazo:
+            pass
+        return
+    # El estado cambia por la tabla de transiciones del núcleo (decidida → firmada | error), con su cerrojo
+    try:
         if proc.returncode == 0:
-            p["estado"] = "firmada"; p["resultado"] = out.decode("utf-8", errors="replace").strip().splitlines()[-1] if out else "firmada"
+            resultado = out.decode("utf-8", errors="replace").strip().splitlines()[-1] if out.strip() else "firmada"
+            p = N.transicion(gid, "firmada", resultado=resultado, error=None)
             texto = f"{_cabecera(p)}\n{_resultado_claro(p['resultado'])}"
         else:
-            p["estado"] = "error"; p["error"] = err.decode("utf-8", errors="replace").strip()[-500:]
+            p = N.transicion(gid, "error", error=err.decode("utf-8", errors="replace").strip()[-500:])
             texto = (f"{_cabecera(p)}\n⚠️ Tu decisión no se ha podido registrar, así que no se ha aplicado.\n"
                      f"Motivo: {p['error'].replace('NOTARIO: rechazado — ', '')}\n"
-                     "Normalmente es porque el proyecto cambió después de abrir esta puerta: espera a la siguiente.")
-        _escribir(idx, p)
+                     "Normalmente es porque el proyecto cambió después de abrir esta puerta: espera a la siguiente.\n"
+                     f"(Para recuperarla: bash puerta.sh recuperar {gid})")
+    except N.Rechazo as e:
+        log.warning("hermes-sdd: %s: %s", gid, e)
+        return
     await _editar(bot, p, texto, None)
 
 
@@ -485,6 +498,69 @@ async def _avisar_fallos(bot) -> None:
         _escribir(HOME / "avisos.json", sorted(avisados | set(nuevos)))
 
 
+# Etapas cuyo worker perdió el kanban (no fallaron ellas): se reintentan solas, como mucho REINTENTOS_MAX veces por
+# etapa, FASE y HEAD del repo (si el HEAD no cambia, el mismo fallo no se repite sin fin). Con el candado del repo vivo
+# no: la etapa sigue en marcha. lanzar.sh reintentar ya no duplica si hay otra en cola y pasa las hijas a la nueva.
+PERDIDO = re.compile(r"managed worker lost|execution unknown|owner silent", re.I)
+REINTENTOS_MAX = 2
+
+
+def _candado_vivo(repo: str) -> bool:
+    lock = Path(repo) / ".sdd" / "hermes" / "lock"
+    if not lock.is_dir():
+        return False
+    try:
+        pid = int((lock / "pid").read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return (time.time() - lock.stat().st_mtime) < 60   # recién creado, sin pid aún
+
+
+async def _reintentar_perdidos(bot=None) -> list:
+    hechos = []
+    registro = _leer(HOME / "reintentos.json", {}) or {}
+    for b, repo in (await _proyectos()).items():
+        if (HOME / "pausa" / b).exists() or (HOME / "pausa" / "_todo").exists() or _candado_vivo(repo):
+            continue
+        for t in await _tarjetas(b):
+            if t.get("assignee") != "sdd-estacion" or t.get("status") != "blocked" \
+                    or not PERDIDO.search(t.get("last_failure_error") or ""):
+                continue
+            etapa, fase = PR._etapa_de(t)
+            if not etapa:
+                continue
+            try:
+                head = (await _cli("git", "-C", repo, "rev-parse", "HEAD")).strip()
+            except Exception:
+                head = ""
+            clave = f"{b}|{etapa}|{fase or ''}|{head}"
+            if registro.get(clave, 0) >= REINTENTOS_MAX:
+                continue
+            try:
+                out = await _cli("bash", str(_root() / "lanzar.sh"), "reintentar", repo, etapa, *([fase] if fase else []),
+                                 "--de", t["id"], timeout=120)
+            except Exception as e:
+                log.warning("hermes-sdd: no se pudo reintentar %s/%s: %s", b, t["id"], e)
+                continue
+            registro[clave] = registro.get(clave, 0) + 1
+            nueva = out.strip().splitlines()[-1] if out.strip() else "?"
+            hechos.append({"tablero": b, "tarjeta": t["id"], "nueva": nueva, "etapa": etapa, "fase": fase, "vez": registro[clave]})
+            log.info("hermes-sdd: %s: %s se perdió (%s); reintento %d en %s", b, t["id"],
+                     _corta_linea(t.get("last_failure_error") or "", 80), registro[clave], nueva)
+            if bot is not None:
+                for chat in _chats():
+                    try:
+                        await bot.send_message(chat_id=int(chat), disable_notification=True, text=(
+                            f"🔁 «{b}»: el kanban perdió el paso «{t.get('title')}» (no falló él); lo repito solo "
+                            f"({registro[clave]} de {REINTENTOS_MAX})."))
+                    except Exception as e:
+                        log.debug("hermes-sdd: aviso de reintento: %s", e)
+    if hechos:
+        _escribir(HOME / "reintentos.json", registro)
+    return hechos
+
+
 async def _crear_tarjeta(puerta: dict) -> str:
     """La tarjeta de la puerta: bloqueada y sin assignee (ningún agente la toma). La crea el gateway porque los
     procesos de un worker del kanban no pueden modificar el tablero."""
@@ -556,44 +632,66 @@ async def _limpiar_tableros() -> None:
             log.warning("hermes-sdd: no se pudo limpiar %s: %s", b, e)
 
 
+async def _vuelta_puerta(bot, idx: Path) -> None:
+    """Una puerta del índice: su tarjeta, Jev, publicarla, firmarla al acabar la ventana o poner su mensaje al día.
+    Sin bot (Telegram no conectado) se hace todo menos lo que es de Telegram."""
+    p = _leer(idx)
+    if not p:
+        return
+    if p.get("estado") == "abierta" and not p.get("tarjeta") and p.get("tablero"):
+        tarjeta = await _crear_tarjeta(p)
+        with N.cerrojo():
+            actual = _leer(idx) or p
+            actual["tarjeta"] = tarjeta
+            _escribir(idx, actual)
+            local = Path(actual["repo"]) / ".sdd" / "hermes" / "puertas" / f"{actual['id']}.json"
+            loc = _leer(local)
+            if loc is not None:
+                loc["tarjeta"] = tarjeta
+                _escribir(local, loc)
+        p = actual
+    p = await _jev_en_puerta(idx, p)
+    # Se publica también la que Jev acaba de decidir: así la ves, con su botón de deshacer, antes de que se firme
+    if bot is not None and ((p.get("estado") == "abierta" and not p.get("telegram"))
+                            or (p.get("estado") == "decidida" and "telegram" not in p)):
+        await asyncio.wait_for(_publicar(bot, p), 60)
+        with N.cerrojo():
+            actual = _leer(idx) or p
+            actual.update(telegram=p["telegram"], publicada=p["publicada"], tg_vista=p["tg_vista"])
+            _escribir(idx, actual)
+    elif (p.get("estado") == "decidida" and time.time() >= p.get("firmar_en", 0)
+          and (p.get("decision") or {}).get("actor", {}).get("canal") != "local"):   # el local lo firma decidir.sh
+        log.info("hermes-sdd: firmando la puerta %s", p["id"])
+        await _firmar(bot, p)
+    elif bot is not None:   # decidida o deshecha desde otro canal (dashboard): el mensaje de Telegram se pone al día
+        await asyncio.wait_for(_sincronizar(bot, p), 60)
+
+
 async def _vuelta(ciclo: int) -> None:
-    bot = _RT["app"].bot   # la app puede reconstruirse tras un fallo de conexión: siempre la actual
+    app = _RT.get("app")
+    bot = app.bot if app is not None else None   # la app puede reconstruirse tras un fallo de conexión: siempre la actual
     for idx in sorted((HOME / "puertas").glob("*.json")):
-        p = _leer(idx)
-        if not p:
-            continue
-        if p.get("estado") == "abierta" and not p.get("tarjeta") and p.get("tablero"):
-            tarjeta = await _crear_tarjeta(p)
-            with N.cerrojo():
-                actual = _leer(idx) or p
-                actual["tarjeta"] = tarjeta
-                _escribir(idx, actual)
-                local = Path(actual["repo"]) / ".sdd" / "hermes" / "puertas" / f"{actual['id']}.json"
-                loc = _leer(local)
-                if loc is not None:
-                    loc["tarjeta"] = tarjeta
-                    _escribir(local, loc)
-            p = actual
-        p = await _jev_en_puerta(idx, p)
-        # Se publica también la que Jev acaba de decidir: así la ves, con su botón de deshacer, antes de que se firme
-        if (p.get("estado") == "abierta" and not p.get("telegram")) or (p.get("estado") == "decidida" and "telegram" not in p):
-            await asyncio.wait_for(_publicar(bot, p), 60)
-            with N.cerrojo():
-                actual = _leer(idx) or p
-                actual.update(telegram=p["telegram"], publicada=p["publicada"], tg_vista=p["tg_vista"])
-                _escribir(idx, actual)
-        elif (p.get("estado") == "decidida" and time.time() >= p.get("firmar_en", 0)
-              and (p.get("decision") or {}).get("actor", {}).get("canal") != "local"):   # el local lo firma decidir.sh
-            log.info("hermes-sdd: firmando la puerta %s", p["id"])
-            await _firmar(bot, p)
-        else:   # decidida o deshecha desde otro canal (dashboard): el mensaje de Telegram se pone al día
-            await asyncio.wait_for(_sincronizar(bot, p), 60)
-    if ciclo % 6 == 0:
-        await asyncio.wait_for(_avisar_lecciones(bot), 60)
+        try:   # una puerta que falla (un repo borrado, un JSON roto, el kanban caído) no bloquea las demás
+            await _vuelta_puerta(bot, idx)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("hermes-sdd: error con la puerta %s (sigue con las demás)", idx.stem)
+    tareas = []
+    if ciclo % 6 == 0 and bot is not None:
+        tareas.append(("lecciones", lambda: _avisar_lecciones(bot), 60))
     if ciclo % 12 == 0:
-        await asyncio.wait_for(_limpiar_tableros(), 300)
-        await asyncio.wait_for(_avisar_fallos(bot), 180)
-        await asyncio.wait_for(_vigia(bot), 180)
+        tareas.append(("limpiar", _limpiar_tableros, 300))
+        tareas.append(("reintentos", lambda: _reintentar_perdidos(bot), 300))
+        if bot is not None:
+            tareas += [("fallos", lambda: _avisar_fallos(bot), 180), ("vigía", lambda: _vigia(bot), 180)]
+    for nombre, tarea, plazo in tareas:   # cada una por separado: si una falla, las demás se hacen igual
+        try:
+            await asyncio.wait_for(tarea(), plazo)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("hermes-sdd: error en %s (sigue)", nombre)
 
 
 async def _bucle() -> None:

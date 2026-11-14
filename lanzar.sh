@@ -7,6 +7,8 @@
 #   lanzar.sh cambio <repo> "<petición>"              un cambio o una funcionalidad nueva (también por /cambio)
 #   lanzar.sh adoptar <repo>                          un repo existente sin método: línea base desde el código
 #   lanzar.sh rehacer <repo> <N>                      vuelve a lanzar la FASE N: huecos (si quedan [PLAN GAP]) → implementar → aceptar
+#   lanzar.sh reintentar <repo> <etapa> [fase] [--de <tarjeta>]   repite una etapa con una tarjeta nueva
+#   lanzar.sh esperar <repo> [--tag T] [--max S]      bloquea hasta un evento (etapa terminada, puerta abierta…): una línea
 #
 # Cada tarjeta de etapa la toma el perfil sdd-estacion y ejecuta `etapa.sh`. Las puertas las abre la propia etapa
 # (puerta.sh) y las cierra el notario; después, este script crea el tramo siguiente:
@@ -222,12 +224,9 @@ case "$CMD" in
                 | if length > 0 then "Criterios de la FASE que no pasan la aceptación (corrígelos todos):", .[] else empty end' || true
             } > "$REPO/.sdd/hermes/feedback/implementar-$N.txt" 2>/dev/null || true
             # La puerta de esa FASE que quedó abierta (bloqueada por lo que este cambio resuelve) ya no tiene sentido
-            for f in "${HERMES_SDD_HOME:-$HOME/.hermes/hermes-sdd}"/puertas/*.json; do
-              [ -f "$f" ] || continue
-              jq -e --arg b "$BOARD" --arg n "$N" '.tablero == $b and .tipo == "fase" and (.fase | tostring) == $n and .estado == "abierta"' "$f" >/dev/null 2>&1 || continue
-              tj=$(jq -r '.tarjeta // empty' "$f")
-              jq --arg g "$GATE" '.estado = "superada" | .superada_por = $g' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-              [ -n "$tj" ] && "${K[@]}" archive "$tj" >/dev/null 2>&1 || true
+            # (la misma regla que puerta.sh, en el núcleo: transición abierta → superada con el cerrojo del índice)
+            for tj in $(HERMES_SDD_HOME="${HERMES_SDD_HOME:-$HOME/.hermes/hermes-sdd}" python3 "$ROOT/plugin/hermes-sdd/hsdd_nucleo.py" superar "$REPO" fase "$N" "$GATE"); do
+              "${K[@]}" archive "$tj" >/dev/null 2>&1 || true
             done
             echo "Cambio sin replanificar (requisitos de las FASEs $RF): se rehace la FASE-$N"
             fase_n "$N" " (requisitos nuevos)"
@@ -285,14 +284,58 @@ case "$CMD" in
       done ;;
 
   reintentar)   # una etapa fallida se repite con una tarjeta NUEVA (nunca se desbloquea la vieja)
-    ETAPA=$3; FASE=${4:-}
+                # --de <tarjeta>: la vieja; sus hijas pasan a esperar a la nueva y la vieja se archiva (el gateway, cuando
+                # el kanban perdió al worker)
+    ETAPA=$3; FASE=""; DE=""; shift 3
+    while [ $# -gt 0 ]; do case "$1" in --de) DE=$2; shift 2 ;; *) FASE=$1; shift ;; esac; done
     # Si Hermes ya la está repitiendo (cada tarjeta tiene un reintento automático) o hay otra en cola, no se duplica:
     # dos a la vez chocan en el candado del repo (club, FASE-3: la vieja se reintentó sola y la nueva quedó «ocupada»)
     if "${K[@]}" list --json 2>/dev/null | jq -e --arg e "etapa.sh $REPO $ETAPA${FASE:+ $FASE}" \
         'any(.[]?; (.status == "running" or .status == "ready" or .status == "todo") and ((.body // "") | endswith($e)))' >/dev/null; then
       echo "ya hay una tarjeta de $ETAPA${FASE:+ $FASE} en marcha o en cola: no se duplica" >&2; exit 1
     fi
-    tarjeta "Reintento: $ETAPA${FASE:+ FASE-$FASE}" - 120m "$ETAPA" $FASE ;;
+    NUEVA=$(tarjeta "Reintento: $ETAPA${FASE:+ FASE-$FASE}" - 120m "$ETAPA" $FASE)
+    if [ -n "$DE" ]; then
+      for h in $("${K[@]}" show "$DE" --json 2>/dev/null | jq -r '.children[]?' 2>/dev/null); do
+        "${K[@]}" link "$NUEVA" "$h" >/dev/null 2>&1 && "${K[@]}" unlink "$DE" "$h" >/dev/null 2>&1 || true
+      done
+      "${K[@]}" comment "$DE" "Se repite en $NUEVA (el kanban perdió su worker)." >/dev/null 2>&1 || true
+      "${K[@]}" archive "$DE" >/dev/null 2>&1 || true
+    fi
+    echo "$NUEVA" ;;
 
-  *) echo "uso: lanzar.sh iniciar <repo> | siguiente <repo> <puerta> <resultado> | rehacer <repo> <N> | reintentar <repo> <etapa> [fase] | limpiar <repo>" >&2; exit 2 ;;
+  esperar)      # esperar <repo> [--tag T] [--max S]: bloquea hasta un evento del proyecto y lo dice en UNA línea.
+                # Para quien vigila una prueba (sustituye a un bucle hecho a mano):
+                #   ETAPA <etapa> [FASE-N] <resultado>: <resumen o motivo>   una etapa terminó (bien, mal, aparcada…)
+                #   PUERTA <id> <tipo> [FASE-N] abierta: <título>             se abrió una puerta
+                #   PUERTA <id> <tipo> [FASE-N] error: <motivo>               el notario no pudo firmarla
+                #   TAG <tag>                                                 existe el tag T (--tag; admite comodines)
+                #   TIEMPO                                                    S segundos sin nada (sale con 3)
+    shift 2; TAG=""; MAX=0
+    while [ $# -gt 0 ]; do
+      case "$1" in --tag) TAG=$2; shift 2 ;; --max) MAX=$2; shift 2 ;; *) echo "esperar: no entiendo «${1}»" >&2; exit 2 ;; esac
+    done
+    HS="${HERMES_SDD_HOME:-$HOME/.hermes/hermes-sdd}"; EJ="$REPO/.sdd/hermes/etapas.jsonl"
+    lineas() { if [ -f "$EJ" ]; then wc -l < "$EJ" | tr -d ' '; else echo 0; fi; }
+    puertas_repo() {  # «id estado» de las puertas de este repo
+      local f; for f in "$HS"/puertas/*.json; do [ -f "$f" ] && jq -r --arg r "$REPO" 'select(.repo == $r) | "\(.id) \(.estado)"' "$f" 2>/dev/null; done; return 0
+    }
+    N0=$(lineas); VISTAS=$(puertas_repo | sort); T0=$(date +%s)
+    while :; do
+      if [ "$(lineas)" -gt "$N0" ]; then
+        sed -n "$((N0 + 1))p" "$EJ" | jq -r '"ETAPA \(.etapa)\(if .fase then " FASE-\(.fase)" else "" end) \(.resultado): \(.resumen // .motivo // "")"'
+        exit 0
+      fi
+      NUEVA=$(comm -13 <(printf '%s\n' "$VISTAS") <(puertas_repo | sort) | grep -E ' (abierta|error)$' | head -1 || true)
+      if [ -n "$NUEVA" ]; then
+        jq -r --arg e "${NUEVA##* }" '"PUERTA \(.id) \(.tipo)\(if (.fase // "") != "" then " FASE-\(.fase)" else "" end) \($e): \(if $e == "error" then ((.error // "") | gsub("\n"; " ") | .[0:200]) else (.titulo // "") end)"' \
+          "$HS/puertas/${NUEVA%% *}.json"
+        exit 0
+      fi
+      if [ -n "$TAG" ]; then t=$(git -C "$REPO" tag -l "$TAG" | head -1); [ -z "$t" ] || { echo "TAG $t"; exit 0; }; fi
+      if [ "$MAX" -gt 0 ] && [ $(( $(date +%s) - T0 )) -ge "$MAX" ]; then echo TIEMPO; exit 3; fi
+      sleep "${HERMES_SDD_ESPERA_INTERVALO_S:-5}"
+    done ;;
+
+  *) echo "uso: lanzar.sh iniciar <repo> | siguiente <repo> <puerta> <resultado> | rehacer <repo> <N> | reintentar <repo> <etapa> [fase] [--de <tarjeta>] | limpiar <repo> | esperar <repo> [--tag T] [--max S]" >&2; exit 2 ;;
 esac

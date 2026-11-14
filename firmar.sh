@@ -48,6 +48,16 @@ jq -e --arg repo "$REPO" --slurpfile d "$DECISION" '
   and (.decision.actor.persona == $d[0].actor.persona) and (.decision.actor.canal == $d[0].actor.canal)' "$IDX" >/dev/null ||
   { echo "NOTARIO: rechazado — la decisión de $GATE no coincide con la que registró un canal" >&2; exit 1; }
 
+# Candado del repo (lib/candado.sh): no se firma con una etapa en marcha (sus commits y los del notario se pisarían).
+# Ocupado por una etapa → sale con 75 y quien llama reintenta más tarde (no es un rechazo); por otra firma, se espera.
+. "$ROOT/lib/candado.sh"
+ESPERA=0
+until candado_tomar "$REPO" firma "$GATE"; do
+  case "$CANDADO_OTRO" in firma*) [ "$ESPERA" -lt 600 ] && { sleep 2; ESPERA=$((ESPERA + 2)); continue; } ;; esac
+  echo "NOTARIO: ocupado — $CANDADO_OTRO; se firmará cuando acabe" >&2; exit 75
+done
+trap candado_soltar EXIT
+
 p() { jq -r "$1 // empty" "$PUERTA"; }
 d() { jq -r "$1 // empty" "$DECISION"; }
 TIPO=$(p .tipo); FASE=$(p .fase); BOARD=$(p .tablero); TASK=$(p .tarjeta); SHA=$(p .sha)
@@ -106,7 +116,22 @@ mkdir -p "$(dirname "$ACTA")"
 hecho() { jq -e --arg s "$1" '.pasos | index($s)' "$ACTA" >/dev/null; }
 marcar() { local t; t=$(mktemp); jq --arg s "$1" '.pasos += [$s] | .actualizado = (now|todate)' "$ACTA" > "$t" && mv "$t" "$ACTA"; }
 fallo() { local t; t=$(mktemp); jq --arg m "$1" '.error = $m | .actualizado = (now|todate)' "$ACTA" > "$t" && mv "$t" "$ACTA"
-  echo "NOTARIO: rechazado — $1" >&2; exit 1; }
+  restaurar_previos; echo "NOTARIO: rechazado — $1" >&2; exit 1; }
+# Lo que la validación registra antes de saber si la puerta de calidad se cumple (inspecciones 1b, exenciones 1c) se
+# escribe sin commit y con copia: si la validación falla se restaura y HEAD no se mueve (antes se commiteaba primero y,
+# si la puerta de calidad fallaba, HEAD había avanzado: todo reintento chocaba con «HEAD no es el commit mostrado»)
+BKP=""
+guardar_previos() {
+  BKP=$(mktemp -d)
+  local f; for f in acceptance/decisions.jsonl acceptance/PENDIENTES.md; do [ -f "$f" ] && cp "$f" "$BKP/$(basename "$f")"; done; return 0
+}
+restaurar_previos() {
+  [ -n "$BKP" ] || return 0
+  local f; for f in acceptance/decisions.jsonl acceptance/PENDIENTES.md; do
+    if [ -f "$BKP/$(basename "$f")" ]; then cp "$BKP/$(basename "$f")" "$f"; else rm -f "$f"; fi
+  done
+  rm -rf "$BKP"; BKP=""
+}
 
 # ── 1. validar (solo la primera vez: después el HEAD ya habrá avanzado con nuestro propio commit) ──────────────────
 if ! hecho validado; then
@@ -136,26 +161,14 @@ if ! hecho validado; then
     requisitos:acepto|requisitos:cambios|ruta:acepto|ruta:completo|ruta:rechazo|plan:conforme|plan:cambios) ;;
     ruta:ruta-*) jq -e --arg v "$VERBO" 'any(.opciones[]; .verbo == $v)' "$PUERTA" >/dev/null || fallo "la puerta no ofrecía la ruta $VERBO" ;;
     fase:acepto|fase:observaciones|fase:rechazo|entrega:acepto|entrega:observaciones|entrega:rechazo) ;;
-    fase:corrijo|entrega:corrijo)
-    if ! hecho registrado; then
-      diario --stage acceptance --kind decision --text "$NOMBRE pide corregir el requisito: $TEXTO" --by "$NOMBRE ($ROL)" >/dev/null
-      mkdir -p .sdd/hermes
-      { echo "En la puerta «$(p .titulo)», $NOMBRE ($ROL) pide corregir el requisito: $TEXTO"; echo
-        node "$SDD" accept challenge list --open ${FASE:+--fase "$FASE"} --json 2>/dev/null | jq -r '[.challenges[]? | select(.state == "open" and .category == "SPEC-QUESTION")
-          | "- \(.id) \(.req) AC\(.ac): «\(.quote)»"] | if length > 0 then "Dudas de la revisión independiente sobre el criterio:", .[] else empty end' 2>/dev/null || true
-      } > ".sdd/hermes/cambio-por-respuestas-$GATE.txt"
-      marcar registrado
-    fi
-    if ! hecho commit; then commit_si_hay "docs(status): requirement correction requested by $NOMBRE" status/; marcar commit; fi
-    RESULTADO="corrijo"; RESUMEN="$NOMBRE ($ROL) pide corregir el requisito: $TEXTO" ;;
-
-  fase:descarto|entrega:descarto) jq -e 'any(.opciones[]; .verbo == "descarto")' "$PUERTA" >/dev/null || fallo "la puerta no ofrecía 🗑 Descartar" ;;
     fase:corrijo|entrega:corrijo) jq -e 'any(.opciones[]; .verbo == "corrijo")' "$PUERTA" >/dev/null || fallo "la puerta no ofrecía ✏️ Corregir el requisito" ;;
+    fase:descarto|entrega:descarto) jq -e 'any(.opciones[]; .verbo == "descarto")' "$PUERTA" >/dev/null || fallo "la puerta no ofrecía 🗑 Descartar" ;;
     mantenimiento:cambio|mantenimiento:ignoro|preguntas:respondo) ;;
     *) fallo "verbo '$VERBO' no vale para una puerta de tipo '$TIPO'" ;;
   esac
   case "$VERBO" in cambios|observaciones|rechazo|ignoro|corrijo|descarto) [ -n "$TEXTO" ] || fallo "'$VERBO' necesita un texto" ;; esac
-  # 1b. inspecciones confirmadas en la puerta (idempotente: una por requisito y puerta)
+  guardar_previos
+  # 1b. inspecciones confirmadas en la puerta (idempotente: una por requisito y puerta); el commit, tras validar
   if [ "$REVISADO" = true ]; then
     for r in $(jq -r '.revisar[]?.id' "$PUERTA"); do
       grep -F "\"$r\"" acceptance/decisions.jsonl 2>/dev/null | grep -qF "puerta $GATE" && continue
@@ -166,8 +179,6 @@ if ! hecho validado; then
         node "$SDD" accept record inspection --req "$r" --note "$QUE" --by "$NOMBRE" --role "$ROL" >/dev/null
       fi || fallo "no se pudo registrar la revisión de $r"
     done
-    git add acceptance/decisions.jsonl 2>/dev/null || true
-    git diff --cached --quiet || git commit -q -m "docs(acceptance): inspection by $NOMBRE" --trailer "Refs: $(jq -r '[.revisar[]?.id] | join(", ")' "$PUERTA")" --trailer "Gate-Id: $GATE"
   fi
   # 1c. exenciones: cada imprescindible sin cumplir del alcance (la FASE o todo) queda eximido con el motivo de la
   # persona y una referencia de seguimiento <PROYECTO>-N, apuntada en acceptance/PENDIENTES.md (el método la exige para
@@ -185,7 +196,6 @@ if ! hecho validado; then
       | [.id, (.title // ""), ([.criteria[]? | select(.state != "pass") | "AC\(.n // .index) (\(.state))"] | join(", "))] | @tsv' 2>/dev/null || true)
     [ -n "$FALTAN" ] || grep -qF "| $GATE |" "$PEND" || fallo "no hay ningún imprescindible sin cumplir que eximir"
     MOTIVO=$(printf '%s' "$TEXTO" | tr '|\n' '/ ')
-    BK=$(mktemp -d); cp "$PEND" "$BK/p"; [ -f acceptance/decisions.jsonl ] && cp acceptance/decisions.jsonl "$BK/d"
     while IFS=$'\t' read -r REQ TIT QUE; do
       [ -n "$REQ" ] || continue
       grep -F "| $REQ " "$PEND" | grep -qF "| $GATE |" && continue
@@ -196,18 +206,13 @@ if ! hecho validado; then
     done <<< "$FALTAN"
     # Si con las exenciones la puerta sigue sin cumplirse (p. ej. falta el vídeo de la demo, que no se exime), no queda
     # nada registrado: se deshace y solo cabe rechazar
-    rc=0
-    if [ "$TIPO" = fase ]; then node "$SDD" gate --fase "$FASE" > "$BK/g" 2>&1 || rc=$?; else node "$SDD" gate > "$BK/g" 2>&1 || rc=$?; fi
+    rc=0; G=$(mktemp)
+    if [ "$TIPO" = fase ]; then node "$SDD" gate --fase "$FASE" > "$G" 2>&1 || rc=$?; else node "$SDD" gate > "$G" 2>&1 || rc=$?; fi
     if [ "$rc" != 0 ] && [ "$rc" != 3 ]; then
-      cp "$BK/p" "$PEND"; if [ -f "$BK/d" ]; then cp "$BK/d" acceptance/decisions.jsonl; else rm -f acceptance/decisions.jsonl; fi
-      git ls-files --error-unmatch "$PEND" >/dev/null 2>&1 || rm -f "$PEND"
-      QUEDA=$(grep -E '^missing video|^FAILING|exit [0-9]' "$BK/g" | grep -v WAIVED | head -2 | paste -sd';' -)
-      rm -rf "$BK"; fallo "aun eximiendo los imprescindibles, la puerta de calidad sigue sin cumplirse ($QUEDA): solo se admite rechazo"
+      QUEDA=$(grep -E '^missing video|^FAILING|exit [0-9]' "$G" | grep -v WAIVED | head -2 | paste -sd';' -); rm -f "$G"
+      fallo "aun eximiendo los imprescindibles, la puerta de calidad sigue sin cumplirse ($QUEDA): solo se admite rechazo"
     fi
-    rm -rf "$BK"
-    git add acceptance/ 2>/dev/null || true
-    git diff --cached --quiet || git commit -q -m "docs(acceptance): waiver by $NOMBRE" \
-      --trailer "Refs: $(grep -F "| $GATE |" "$PEND" | awk -F'|' '{print $3}' | awk '{print $1}' | paste -sd, - | sed 's/,/, /g')" --trailer "Gate-Id: $GATE"
+    rm -f "$G"
   fi
   # Aceptar una FASE exige la puerta de calidad cumplida (0) o cumplida con exenciones (3); rechazar, no
   if { [ "$TIPO" = fase ] || [ "$TIPO" = entrega ]; } && [ "$VERBO" != rechazo ] && [ "$VERBO" != descarto ] && [ "$VERBO" != corrijo ]; then
@@ -219,9 +224,25 @@ if ! hecho validado; then
   t=$(mktemp); jq --arg r "$ROL" --arg n "$NOMBRE" --arg h "$(git rev-parse HEAD)" --arg g "${rc:-}" \
     '.rol=$r | .nombre=$n | .head=$h | .gate_exit=$g' "$ACTA" > "$t" && mv "$t" "$ACTA"
   marcar validado
+  rm -rf "$BKP"; BKP=""   # validado: lo registrado se queda (y se commitea en el paso siguiente)
 fi
 ROL=$(jq -r .rol "$ACTA"); NOMBRE=$(jq -r .nombre "$ACTA"); HEAD0=$(jq -r .head "$ACTA")
-CHANNEL="$CANAL:$ID $PRUEBA ${BOARD}/${TASK}"
+# 1d. commits de lo registrado al validar (inspecciones o exenciones). Si se corta antes, el reintento los hace.
+if [ "$REVISADO" = true ] && ! hecho inspeccion; then
+  git add acceptance/decisions.jsonl 2>/dev/null || true
+  git diff --cached --quiet || git commit -q -m "docs(acceptance): inspection by $NOMBRE" --trailer "Refs: $(jq -r '[.revisar[]?.id] | join(", ")' "$PUERTA")" --trailer "Gate-Id: $GATE"
+  marcar inspeccion
+fi
+if [ "$EXIMO" = true ] && ! hecho exencion; then
+  git add acceptance/ 2>/dev/null || true
+  git diff --cached --quiet || git commit -q -m "docs(acceptance): waiver by $NOMBRE" \
+    --trailer "Refs: $(grep -F "| $GATE |" acceptance/PENDIENTES.md | awk -F'|' '{print $3}' | awk '{print $1}' | paste -sd, - | sed 's/,/, /g')" --trailer "Gate-Id: $GATE"
+  marcar exencion
+fi
+CHANNEL="$CANAL:$ID $PRUEBA ${BOARD}/${TASK} gate:$GATE"
+# Clave de idempotencia de los registros de aceptación: el id de la puerta (con «${BOARD}/${TASK}» y la tarjeta vacía,
+# cualquier registro anterior casaba y la aceptación no se registraba)
+registrada() { grep -qF "gate:$GATE\"" acceptance/decisions.jsonl 2>/dev/null; }
 HOY=$(date +%Y-%m-%d)
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 etiquetar() {  # etiquetar <tag> <mensaje> — idempotente: si existe y apunta a HEAD, ya está hecho
@@ -409,7 +430,7 @@ Kanban-Task: $BOARD/$TASK"
     RES=accepted; [ "$VERBO" = observaciones ] && RES=observations
     if ! hecho registrado; then
       # Idempotente: si ya hay un registro con este canal (misma puerta), no se repite
-      if ! grep -qF "${BOARD}/${TASK}" acceptance/decisions.jsonl 2>/dev/null; then
+      if ! registrada; then
         node "$SDD" accept record fase-acceptance --fase "$FASE" --result "$RES" \
           --channel "$CHANNEL" --by "$NOMBRE" --role "$ROL" >/dev/null
       fi
@@ -482,7 +503,7 @@ PY
         | if length > 0 then "Hallazgos de la revisión independiente (el test o la captura no prueban el criterio):", .[] else empty end' 2>/dev/null || true
     } > ".sdd/hermes/feedback/implementar-$FASE.txt"
     if ! hecho registrado; then
-      grep -qF "${BOARD}/${TASK}" acceptance/decisions.jsonl 2>/dev/null ||
+      registrada ||
         node "$SDD" accept record fase-acceptance --fase "$FASE" --result rejected \
           --channel "$CHANNEL" --by "$NOMBRE" --role "$ROL" >/dev/null
       diario --stage acceptance --kind feedback --text "$TEXTO" --by "$NOMBRE ($ROL)" >/dev/null
@@ -497,7 +518,7 @@ PY
     # registros: el de la FASE y el de la entrega)
     UNICA=$(p .unica); RES=accepted; [ "$VERBO" = observaciones ] && RES=observations
     if [ "$UNICA" = true ] && ! hecho registrado; then
-      grep -qF "${BOARD}/${TASK}" acceptance/decisions.jsonl 2>/dev/null ||
+      registrada ||
         node "$SDD" accept record fase-acceptance --fase 0 --result "$RES" --channel "$CHANNEL" --by "$NOMBRE" --role "$ROL" >/dev/null
       node "$SDD" accept --report acceptance/ACCEPTANCE-REPORT.md --fase 0 >/dev/null 2>&1 || true
     fi
@@ -531,6 +552,20 @@ $(node "$SDD" gate --md 2>/dev/null)"
     if ! hecho fusion; then fusionar "delivery $N accepted"; marcar fusion; fi
     RESULTADO="$VERBO"; RESUMEN="Entrega $N aceptada por $NOMBRE ($ROL) — tag entrega-$N$FUSION"
     [ "$UNICA" = true ] && RESUMEN="Entrega $N (y su única fase) aceptada por $NOMBRE ($ROL) — tag entrega-$N$FUSION" ;;
+
+  fase:corrijo|entrega:corrijo)
+    # «✏️ Corregir el requisito»: lo pedido y las dudas de la revisión van a un cambio de requisitos (paso 3)
+    if ! hecho registrado; then
+      diario --stage acceptance --kind decision --text "$NOMBRE pide corregir el requisito: $TEXTO" --by "$NOMBRE ($ROL)" >/dev/null
+      mkdir -p .sdd/hermes
+      { echo "En la puerta «$(p .titulo)», $NOMBRE ($ROL) pide corregir el requisito: $TEXTO"; echo
+        node "$SDD" accept challenge list --open ${FASE:+--fase "$FASE"} --json 2>/dev/null | jq -r '[.challenges[]? | select(.state == "open" and .category == "SPEC-QUESTION")
+          | "- \(.id) \(.req) AC\(.ac): «\(.quote)»"] | if length > 0 then "Dudas de la revisión independiente sobre el criterio:", .[] else empty end' 2>/dev/null || true
+      } > ".sdd/hermes/cambio-por-respuestas-$GATE.txt"
+      marcar registrado
+    fi
+    if ! hecho commit; then commit_si_hay "docs(status): requirement correction requested by $NOMBRE" status/; marcar commit; fi
+    RESULTADO="corrijo"; RESUMEN="$NOMBRE ($ROL) pide corregir el requisito: $TEXTO" ;;
 
   fase:descarto|entrega:descarto)
     if ! hecho registrado; then
@@ -612,7 +647,11 @@ fi
 # ── 3. cerrar la puerta en el tablero y encadenar lo siguiente ────────────────────────────────────────────────────
 if [ -n "$BOARD" ] && ! hecho completado; then
   # Sin tarjeta todavía (decidida desde el ordenador antes de que el gateway la creara): no hay nada que cerrar
-  [ -n "$TASK" ] && hermes kanban --board "$BOARD" complete "$TASK" --result "$RESUMEN" >/dev/null
+  if [ -n "$TASK" ] && ! ko=$(hermes kanban --board "$BOARD" complete "$TASK" --result "$RESUMEN" 2>&1 >/dev/null); then
+    # la tarjeta ya no se puede cerrar (archivada a mano, superada…): lo firmado vale igual; queda anotado en el acta
+    t=$(mktemp); jq --arg m "no se pudo cerrar la tarjeta $TASK: ${ko:0:200}" '.aviso_tablero = $m' "$ACTA" > "$t" && mv "$t" "$ACTA"
+    echo "NOTARIO: aviso — no se pudo cerrar la tarjeta $TASK de $BOARD (¿archivada?); la firma sigue" >&2
+  fi
   marcar completado
 fi
 if ! hecho encadenado; then
@@ -650,7 +689,8 @@ if ! hecho historial; then
      bloqueada: ($i.bloqueo // false)}' >> .sdd/hermes/puertas.jsonl 2>/dev/null || true
   marcar historial
 fi
-if [ -f "$IDX" ]; then
-  t=$(mktemp); jq --arg r "$RESUMEN" --arg v "$VERBO" '.estado = "firmada" | .resultado = $r | .verbo = $v' "$IDX" > "$t" && mv "$t" "$IDX"
+if [ -f "$IDX" ]; then   # por la tabla de transiciones del núcleo, con su cerrojo (decidida|error|firmada → firmada)
+  HERMES_SDD_HOME="$HOME_SDD" python3 "$ROOT/plugin/hermes-sdd/hsdd_nucleo.py" transicion "$GATE" firmada \
+    resultado="$RESUMEN" verbo="$VERBO" -error >&2 || echo "NOTARIO: aviso — firmada, pero el índice no se pudo poner al día" >&2
 fi
 echo "$RESUMEN"
