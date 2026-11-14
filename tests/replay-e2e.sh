@@ -25,5 +25,5 @@ tags=$(git -C "$R" tag -l 'requirements-v*' 'fase-*-accepted' 'entrega-*' | tr '
 [ "$(echo $tags | wc -w | tr -d ' ')" = 6 ] && ok "tags: $tags" || bad "tags: $tags"
 ajenas=$(jq -r 'select(.by != "Alumna" and .by != "command") | "\(.type) por \(.by)"' "$R/acceptance/decisions.jsonl" | sort -u | tr '\n' ' ')
 [ -z "$ajenas" ] && ok "las decisiones registradas son de quien practica (ninguna heredada de la grabación)" || bad "decisiones ajenas: $ajenas"
-if g=$(cd "$R" && node "$ROOT/metodo/scripts/sdd.mjs" gate 2>&1); then ok "gate global en verde"; else bad "gate global no se cumple: $(echo "$g" | grep -vE '^\s*$' | grep -iE 'fail|missing|✗|❌|not|error' | head -8 | tr '\n' ' ')"; fi
+if g=$(cd "$R" && node "$ROOT/metodo/scripts/sdd.mjs" gate 2>&1); then ok "gate global en verde"; else bad "gate global no se cumple: $(echo "$g" | grep -vE '^\s*$' | grep -iE 'fail|missing|✗|❌|not|error' | head -8 | tr '\n' ' ')"; (cd "$R" && git status --porcelain | head -5; node "$ROOT/metodo/scripts/sdd.mjs" gate --json 2>/dev/null | jq -c '[.. | objects | select(.stale_reason?) | {ref, stale_reason}] | unique | .[:5]'); fi
 exit $fail
