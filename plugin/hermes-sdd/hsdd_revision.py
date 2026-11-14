@@ -43,9 +43,9 @@ def _leer(p: Path) -> str:
         return ""
 
 
-def _requisitos(repo: Path) -> list:
-    """[{id, tipo, titulo, verificacion, prioridad, necesidades, criterios}] de REQUIREMENTS.md."""
-    texto = _leer(repo / "requirements" / "REQUIREMENTS.md")
+def _requisitos(repo: Path, texto: str | None = None) -> list:
+    """[{id, tipo, titulo, verificacion, prioridad, necesidades, criterios}] de REQUIREMENTS.md (o del texto dado)."""
+    texto = _leer(repo / "requirements" / "REQUIREMENTS.md") if texto is None else texto
     out = []
     for m in re.finditer(r"^### (REQ-([A-Z]+)-\d+):?\s*(.*?)\n(.*?)(?=^### |^## |\Z)", texto, re.M | re.S):
         cuerpo = m.group(4)
@@ -98,16 +98,49 @@ def ruta(repo: Path) -> list:
     return []
 
 
+def _git(repo: Path, *a: str) -> str:
+    try:
+        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _ultima_entrega(repo: Path) -> str:
+    return _git(repo, "describe", "--tags", "--abbrev=0", "--match", "entrega-*").strip()
+
+
+def _tareas(textos: list[str]) -> set:
+    return {m for x in textos for m in re.findall(r"^- \[[ x!]\] (TASK-[\w-]+)", x, re.M)}
+
+
+def _medida_plan(repo: Path) -> dict:
+    """Lo que hay que comparar en el plan: todo el proyecto o, tras una entrega (tag entrega-*), solo lo que añade este
+    cambio (club: «111 tareas para 3 requisitos» contaba las 108 de las entregas anteriores)."""
+    reqs = [r for r in _requisitos(repo) if r["tipo"] == "F"]
+    fases = sorted(p.name for p in (repo / "plan" / "fases").glob("FASE-*.md"))
+    tareas = _tareas([_leer(t) for t in (repo / "task").glob("TASK-FASE-*.md")])
+    tag = _ultima_entrega(repo)
+    if not tag:
+        return {"n_f": len(reqs), "fases": len(fases), "tareas": len(tareas), "desde": ""}
+    antes = {r["id"] for r in _requisitos(repo, _git(repo, "show", f"{tag}:requirements/REQUIREMENTS.md")) if r["tipo"] == "F"}
+    fases_antes = {Path(f).name for f in _git(repo, "ls-tree", "--name-only", f"{tag}:plan/fases").split()}
+    tareas_antes = _tareas([_git(repo, "show", f"{tag}:task/{f}") for f in _git(repo, "ls-tree", "--name-only", f"{tag}:task").split()
+                            if re.match(r"TASK-FASE-.*\.md$", f)])
+    return {"n_f": max(1, len([r for r in reqs if r["id"] not in antes])), "fases": len([f for f in fases if f not in fases_antes]),
+            "tareas": len(tareas - tareas_antes), "desde": tag}
+
+
 def plan(repo: Path) -> list:
     av = [_aviso("criterio-de-otra-fase", f"{h['requisito']} {h['criterio']} (FASE-{h['fase']}) cita «{h['cita']}», que llega en la "
                  f"FASE-{h['fase_vista']}: esa FASE no podrá aceptarse tal cual (pide un cambio con ✏️ para moverlo o adelantar esa pantalla)", True) for h in hsdd_plan.dependencias(repo)]
-    n_f = sum(1 for r in _requisitos(repo) if r["tipo"] == "F")
-    fases = list((repo / "plan" / "fases").glob("FASE-*.md"))
-    tareas = sum(len(re.findall(r"^- \[[ x]\] TASK-", _leer(t), re.M)) for t in (repo / "task").glob("TASK-FASE-*.md"))
-    if n_f and len(fases) > max(2, math.ceil(n_f / 2)):
-        av.append(_aviso("fases-de-mas", f"{len(fases)} FASEs para {n_f} requisitos funcionales: más fases son más puertas y más espera"))
-    if n_f and tareas > max(8, 4 * n_f):
-        av.append(_aviso("tareas-de-mas", f"{tareas} tareas para {n_f} requisitos funcionales: parece más trabajo del necesario"))
+    m = _medida_plan(repo)
+    n_f, donde = m["n_f"], (f" en este cambio (desde {m['desde']})" if m["desde"] else "")
+    nuevos = ("requisito funcional" if n_f == 1 else "requisitos funcionales") + (" nuevo" if n_f == 1 else " nuevos") * bool(m["desde"])
+    # mínimos absolutos: 2 FASEs y 8 tareas no son nunca «de más»
+    if n_f and m["fases"] > max(2, math.ceil(n_f / 2)):
+        av.append(_aviso("fases-de-mas", f"{m['fases']} FASEs{donde} para {n_f} {nuevos}: más fases son más puertas y más espera"))
+    if n_f and m["tareas"] > max(8, 4 * n_f):
+        av.append(_aviso("tareas-de-mas", f"{m['tareas']} tareas{donde} para {n_f} {nuevos}: parece más trabajo del necesario"))
     # Referencias a escenarios o requisitos que ya no existen (sala: un cambio quitó AC-004-03 y el plan lo seguía citando)
     for h in hsdd_fidelidad.coherencia(repo):
         if h["tipo"] == "referencia" and h["donde"].startswith(("plan/", "task/")):
@@ -155,6 +188,8 @@ def _fidelidad(repo: Path, n: str | None) -> list:
     except (OSError, ValueError):
         return []
     av = []
+    if r.get("error"):   # la comprobación no se pudo hacer: no vale como «sin hallazgos» (etapa.sh lo deja así)
+        av.append(_aviso("fidelidad-sin-comprobar", f"No se pudo comprobar si los tests y las capturas prueban lo pedido ({r['error']})", True))
     for x in r.get("congelados", []):
         if not x.get("grave") and x.get("debilitamiento"):
             av.append(_aviso("test-congelado-autorizado", f"Test ya aceptado cambiado con autorización ({x['fichero']}): {', '.join(x['debilitamiento'])} — {x['autorizacion']}"))
@@ -220,6 +255,25 @@ def revisor_ia(repo: Path, tipo: str, fase_n: str | None = None) -> list:
     return av[:5]
 
 
+def huella(a: dict) -> str:
+    import hashlib
+    return hashlib.sha1(f"{a.get('codigo')}|{a.get('texto')}".encode()).hexdigest()[:12]
+
+
+def vistos_en_firmadas(repo: Path) -> set:
+    """Huellas de los avisos que una persona ya vio en una puerta que firmó (.sdd/hermes/puertas.jsonl lo escribe el
+    notario; el aviso, la puerta de entonces)."""
+    out = set()
+    for l in _leer(repo / ".sdd" / "hermes" / "puertas.jsonl").splitlines():
+        try:
+            pid = json.loads(l).get("puerta")
+            p = json.loads(_leer(repo / ".sdd" / "hermes" / "puertas" / f"{pid}.json") or "{}")
+        except (ValueError, AttributeError):
+            continue
+        out |= {huella(a) for a in (p.get("encargado") or {}).get("avisos") or []}
+    return out
+
+
 def revisar(repo, tipo: str, fase_n: str | None = None, ia: bool = False) -> dict:
     repo = Path(repo)
     av = {"requisitos": lambda: requisitos(repo), "ruta": lambda: ruta(repo), "plan": lambda: plan(repo),
@@ -227,7 +281,12 @@ def revisar(repo, tipo: str, fase_n: str | None = None, ia: bool = False) -> dic
           }.get(tipo, lambda: [])()
     if ia:
         av += revisor_ia(repo, tipo, fase_n)
-    return {"avisos": av, "graves": sum(1 for a in av if a["grave"])}
+    # Un aviso que no es grave y que la persona ya vio igual en una puerta que firmó no se repite (club: los mismos
+    # «tests de más» en cada puerta). Los graves se repiten siempre: Jev no puede aprobar una puerta con uno.
+    vistos = vistos_en_firmadas(repo)
+    callados = [a for a in av if not a["grave"] and huella(a) in vistos]
+    av = [a for a in av if a not in callados]
+    return {"avisos": av, "graves": sum(1 for a in av if a["grave"]), "ya_vistos": len(callados)}
 
 
 def linea(rev: dict, max_lineas: int = 6) -> str:
@@ -235,11 +294,18 @@ def linea(rev: dict, max_lineas: int = 6) -> str:
     av = rev.get("avisos") or []
     if not av:
         return ""
+    ya = rev.get("ya_vistos") or 0
     cab = f"🧭 Encargado: {len(av)} aviso{'s' if len(av) != 1 else ''}" + (f" ({rev['graves']} grave{'s' if rev['graves'] != 1 else ''}: Jev no puede aprobar esta puerta solo)" if rev.get("graves") else "")
     filas = [f"{'‼️' if a['grave'] else '•'} {a['texto']}" for a in sorted(av, key=lambda a: not a["grave"])[:max_lineas]]
     if len(av) > max_lineas:
         filas.append(f"… y {len(av) - max_lineas} más")
+    if ya:
+        filas.append(f"({_plural_av(ya)} que ya viste en una puerta firmada, sin cambios, no se repite{'n' if ya != 1 else ''})")
     return cab + "\n" + "\n".join(filas)
+
+
+def _plural_av(n: int) -> str:
+    return f"{n} aviso" if n == 1 else f"{n} avisos"
 
 
 if __name__ == "__main__":
