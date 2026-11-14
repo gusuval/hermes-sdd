@@ -54,7 +54,10 @@ ETAPAS_MODELO = [("requisitos", "Requisitos"), ("ruta", "Ruta"),
                  ("ux", "Diseño visual y de uso"), ("plan", "Plan"), ("tareas", "Tareas"),
                  ("huecos", "Completar huecos del plan"), ("implementar", "Implementar"), ("aceptar", "Aceptar"),
                  ("brechas", "Huecos entre especificación y código"),
-                 ("cierre", "Cierre y entrega"), ("cambio", "Cambio de requisitos"), ("adoptar", "Adoptar un repo")]
+                 ("cierre", "Cierre y entrega"), ("cambio", "Cambio de requisitos"), ("adoptar", "Adoptar un repo"),
+                 # sin estar aquí, «modelo» no les daba ninguno y Claude usaba el suyo (Opus): aplicar respuestas y el
+                 # mantenimiento son trabajo de implementación, con el modelo que el perfil da a implementar
+                 ("respuestas", "Aplicar respuestas"), ("mantener", "Mantenimiento")]
 # juicio del contrato: donde más rinde un modelo grande
 _PIENSAN = ("requisitos", "especificar", "auditar", "seguridad", "tecnico", "plan", "cambio", "adoptar")
 PERFILES = {
@@ -346,11 +349,18 @@ def _sin_tildes(t: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
 
 
+VITEST_MAX_WORKERS = 2   # las etapas comparten la máquina (y con Playwright): Vitest, sin tope, usa todos los núcleos
+
+
 def agents_md(nombre: str, s: dict, que: str) -> str:
     resumen = " ".join(que.split())
     resumen = resumen if len(resumen) <= 300 else resumen[:297] + "…"
+    vitest = "vitest" in f"{s.get('stack', '')} {s.get('test_file', '')}".lower()
+    tf = s.get("test_file") or ""
+    if vitest and "vitest" in tf and "maxWorkers" not in tf:
+        tf = f"{tf} --maxWorkers={VITEST_MAX_WORKERS}"
     perfil = [f"- stack: {s['stack']}", f"- test: {s['test']}"]
-    perfil += [f"- test_file: {s['test_file']}"] if s.get("test_file") else []
+    perfil += [f"- test_file: {tf}"] if tf else []
     perfil += [f"- code_paths: {s.get('code_paths') or 'src/'}", f"- test_paths: {s.get('test_paths') or 'tests/'}",
                "- task_state: trailers", "- test_slots: 1"]
     perfil += [f"- server: {s['server']}"] if s.get("server") else []
@@ -359,7 +369,9 @@ def agents_md(nombre: str, s: dict, que: str) -> str:
             f"Stack elegido al crear el proyecto: {s['nombre']} ({s['stack']}). No lo cambies sin un requisito que lo pida.\n\n"
             "## SDD Stack Profile\n" + "\n".join(perfil) + "\n\n"
             "## Convenciones\n- Código y textos de la interfaz en español (o el idioma del proyecto).\n"
-            "- Cualquier cambio de comportamiento lleva su test.\n")
+            "- Cualquier cambio de comportamiento lleva su test.\n"
+            + (f"- Vitest con como mucho {VITEST_MAX_WORKERS} workers: `test: {{ maxWorkers: {VITEST_MAX_WORKERS} }}` en "
+               "vitest.config (la máquina la comparten otras etapas y el navegador de los e2e).\n" if vitest else ""))
 
 
 def intent_md(que: str) -> str:
