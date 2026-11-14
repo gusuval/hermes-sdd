@@ -21,6 +21,10 @@
 //     such as `No tasks`. A backtick span before THEN is the command or route the test drives (`todo add "Buy milk"`,
 //     `/projects`); a helper builds it, so it is not required verbatim, and quotes inside it are not literals either;
 //   - empty literals ("") are ignored.
+// With the «Se ve» contract (a `- Se ve:` / `- No visible:` line under the criterion, sdd-jev.mjs parseSees) the
+// literals are typed (requiredLiterals): the `Se ve:` texts and the THEN's own literals are exact text; a text with a
+// {variable} is a template, only its fixed parts are required; a literal the GIVEN/WHEN already quotes is data of the
+// example («lucia») and is not required verbatim. Criteria without the contract keep the rule above.
 // A literal a helper builds (never verbatim in the file) is a false positive: a person records
 // `sdd accept record literal-exception --req ID --ac N --literal TEXT --reason …`, which holds while the
 // requirement's text keeps its reqHash.
@@ -28,6 +32,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { stackProfile } from "./git-log.mjs";
 import { testKeys, reqHash, acNumber, scenarioIndex } from "./acceptance.mjs";
+import { templateParts } from "../sdd-jev.mjs";
 
 export const LITERAL_MODES = ["off", "warn", "enforce"];
 export const QUOTE_CODES = { missingQuote: "Q-01", staleQuote: "Q-02", missingLiteral: "Q-03" };
@@ -73,6 +78,42 @@ export function criterionLiterals(text) {
     if (!k || seen.has(k)) continue;
     seen.add(k);
     out.push({ literal: f.literal.trim(), kind: f.kind });
+  }
+  return out;
+}
+
+/**
+ * What Q-03 asks the test to carry, typed: [{ literal, kind: "exact" | "template" | "code" | "quote", parts }]; every
+ * part must be in the test's code. Without a «Se ve» contract (`sees` undefined: a criterion written before it), every
+ * literal of the criterion, verbatim (the original rule). With it:
+ *   - exact text: each `Se ve:` text, and each literal of the THEN that is not data of the example;
+ *   - template: a text with a {variable} («Hola, {usuario}»): only its fixed parts («Hola,»), whoever the actor is;
+ *   - data of the example: a literal that the GIVEN or the WHEN already quotes («lucia», «pista 2») — the test may use
+ *     other data (a second actor) and still prove the criterion, so it is not required verbatim.
+ */
+export function requiredLiterals(text, sees) {
+  const lits = criterionLiterals(text);
+  if (!sees) return lits.map((l) => ({ ...l, parts: [l.literal] }));
+  const s = String(text || "");
+  let thenAt = s.search(/\b(?:THEN|ENTONCES)\b/);
+  if (thenAt < 0) thenAt = s.length;
+  const data = new Set(criterionLiterals(s.slice(0, thenAt)).map((l) => normLiteral(l.literal)));
+  const out = [], seen = new Set();
+  const add = (literal, kind) => {
+    const k = normLiteral(literal);
+    if (!k || seen.has(k)) return;
+    seen.add(k);
+    const template = /\{[^{}]+\}/.test(literal);
+    const parts = template ? templateParts(literal) : [literal];
+    if (parts.length) out.push({ literal, kind: template ? "template" : kind, parts });
+  };
+  for (const t of sees.texts || []) add(t.text, "exact");
+  // «Hola, lucia» in the THEN is one instance of the template «Hola, {usuario}»: data of the example too
+  const instance = (sees.texts || []).filter((t) => t.template).map((t) => new RegExp(`^${normLiteral(t.text)
+    .split(/\{[^{}]+\}/).map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".+")}$`, "u"));
+  for (const l of lits) {
+    const k = normLiteral(l.literal);
+    if (!data.has(k) && !instance.some((re) => re.test(k))) add(l.literal, l.kind === "code" ? "code" : "exact");
   }
   return out;
 }
@@ -261,11 +302,12 @@ export function lintQuotes({ root, reqs, scenarios = [], records = [], scope = n
       for (const q of mine.filter((x) => !quoteMatches(x.quote, text)))
         findings.push({ code: "Q-02", severity: "error", ...base, line: q.line, quote: q.quote, message: `the quote is not the current text of ${req.id} AC${ac} (forged, or left behind by a MODIFY): quote it again with sdd req show ${req.id} --ac ${ac}` });
       const at = mine.length ? mine[0].line : line;
-      for (const lit of criterionLiterals(text)) {
-        if (codeNorm.includes(normLiteral(lit.literal))) continue;
+      for (const lit of requiredLiterals(text, (req.sees || [])[ac - 1])) {
+        if (lit.parts.every((p) => codeNorm.includes(normLiteral(p)))) continue;
         const ex = exceptions.find((e) => e.req === req.id && acNumber(e.ac) === ac && normLiteral(e.literal) === normLiteral(lit.literal));
+        const what = lit.kind === "template" ? `the form of the template "${lit.literal}" (${lit.parts.map((p) => `"${p}"`).join(", ")})` : `the literal "${lit.literal}"`;
         findings.push({ code: "Q-03", severity: ex ? "excepted" : "error", ...base, line: at, literal: lit.literal,
-          message: `the literal "${lit.literal}" of ${req.id} AC${ac} is not in the test's code (a comment does not count)${ex ? ` — excepted by ${ex.by} (${ex.role}), acceptance/decisions.jsonl:${ex.line}` : ""}`,
+          message: `${what} of ${req.id} AC${ac} is not in the test's code (a comment does not count)${ex ? ` — excepted by ${ex.by} (${ex.role}), acceptance/decisions.jsonl:${ex.line}` : ""}`,
           ...(ex ? { exception: { line: ex.line, by: ex.by, role: ex.role, reason: ex.reason } } : {}) });
       }
     }

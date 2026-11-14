@@ -52,6 +52,17 @@
 //       (a backtick span before it is the command or route the test drives). A literal-exception record turns a Q-03
 //       into `excepted`. Prints `file:line Q-0N REQ-X-NNN ACn message` and a summary; --json {findings[{code, severity,
 //       req, ac, file, line, literal?, quote?, exception?, message}], summary}. Exit 1 on any error not excepted.
+//       With the «Se ve» contract (`- Se ve: "…" en <pantalla>` / `- No visible: <motivo>` under a criterion) literals
+//       are typed: Se ve texts and the THEN's own literals are exact; a {variable} text is a template (its fixed parts
+//       only); a literal the GIVEN/WHEN quotes is data of the example and not required verbatim.
+//   sdd lint --captures [--fase N] [--json]
+//       Captures before the acceptance (scripts/lib/captures-lint.mjs): C-01 error, a capture call right after an API
+//       check (request./fetch() with no on-screen assertion in between (expect(page.getBy…|locator(…)) or the helper's
+//       { ve: [...] }) · C-02 warning, one image backs more than 3 criteria or shows a criterion while named after
+//       another · C-03 error, the capture of a REQ-F criterion is taken by a test whose title does not cite it (static:
+//       the capture id against the enclosing test's title, a test.step does not count; and the ledger's
+//       unbound_captures) · C-04 warning, an id (UC-, REQ-, WF-, AC-) cited in a test that exists in no document. Exit 1
+//       on any error.
 //   sdd lint --floor [--base REF] [--json]
 //       Floor guard (scripts/lib/floor.mjs): was the bar lowered between a base commit and the working tree (plus
 //       untracked files)? Base: --base REF (source flag) · else merge-base of HEAD with the default branch (merge-base;
@@ -86,6 +97,13 @@
 //       evidencias): a REQ-F criterion needs a screenshot — a JUnit `[[ATTACHMENT|…]]`, a record's --attach, or a file
 //       of the evidence dir named after its AC-NNN-NN or REQ-F-NNN-ACn — else it is `unshown` and the requirement
 //       MISSING ("no visual evidence"); warn only reports it. The ledger counts them in summary.unshown.
+//       An image shows a criterion only when a passing test bound to it attached it for that criterion (its sidecar
+//       AC-….json from the capture helper, or its name, or a generic name in a test bound to that criterion alone), or
+//       a capture of the evidence dir named after it was taken by such a test; one taken by a test whose title does not
+//       cite the criterion is listed in `unbound_captures` and does not count (a name-bound capture nobody attached
+//       keeps counting by name). Each criterion lists `shown_by` and `videos` (criterion → video index); Stack Profile
+//       `criterion_video: required|warn|off` (default warn) asks a video of every browser test bound to a REQ-F
+//       criterion (required: a passing criterion without one is unshown; summary.criteria_without_video counts them).
 //       Literal letter (Stack Profile `literal_gate: off|warn|enforce`, default enforce): each criterion lists the
 //       `literal_gaps` of `sdd lint --quotes` (Q-02/Q-03 not excepted); under enforce a passing criterion of a Must with
 //       one is `weakened` and the requirement MISSING ("test does not carry the criterion's literal"); warn only lists
@@ -880,7 +898,7 @@ function cmdReq(o) {
   if (!existsSync(file)) die(`${display(file)} not found`);
   const req = parseRequirements(readFileSync(file, "utf8")).find((r) => r.id === id);
   if (!req) { console.error(`${PROG}: ${id} is not in ${display(file)}`); return 1; }
-  let criteria = req.criteria.map((text, i) => ({ n: i + 1, text }));
+  let criteria = req.criteria.map((text, i) => ({ n: i + 1, text, ...((req.sees || [])[i] ? { sees: req.sees[i] } : {}) }));
   if (o.ac !== undefined) {
     const m = String(o.ac).match(/^(?:AC)?(\d+)$/i);
     if (!m) usage("--ac must be a criterion number (2 or AC2)");
@@ -898,7 +916,11 @@ function cmdReq(o) {
   out(`${req.id}: ${req.title}${req.deprecated ? "  [deprecated]" : ""}`);
   out(`Statement: ${req.statement}`);
   out(`Priority: ${req.priority || "—"} · Verification: ${req.verification || "—"} · Needs: ${(req.needs || []).join(", ") || "—"}`);
-  for (const c of criteria) out(`AC${c.n}: ${c.text}`);
+  for (const c of criteria) {
+    out(`AC${c.n}: ${c.text}`);
+    if (c.sees?.none) out(`  No visible: ${c.sees.none}`);
+    else if (c.sees) out(`  Se ve: ${c.sees.texts.map((t) => `"${t.text}"`).join(", ")}${c.sees.where ? ` en ${c.sees.where}` : ""}`);
+  }
   return 0;
 }
 
@@ -944,7 +966,7 @@ export function run(argv, { prog = "sdd", helpUrl = import.meta.url, legacy = fa
       if (argv.includes("--help") || argv.includes("-h")) { try { help(0); } catch (e) { if (e instanceof Exit) return e.code; throw e; } }
       return runFloor([...argv.slice(0, first.index), ...argv.slice(first.index + 1)].filter((a) => a !== "--floor"), { prog });
     }
-    if (["accept", "gate", "loop"].includes(first.cmd) || (first.cmd === "lint" && (argv.includes("--needs") || argv.includes("--quotes")))) {
+    if (["accept", "gate", "loop"].includes(first.cmd) || (first.cmd === "lint" && (argv.includes("--needs") || argv.includes("--quotes") || argv.includes("--captures")))) {
       if (argv.includes("--help") || argv.includes("-h")) { try { help(0); } catch (e) { if (e instanceof Exit) return e.code; throw e; } }
       return runAcceptance(first.cmd, [...argv.slice(0, first.index), ...argv.slice(first.index + 1)].filter((a) => a !== "--needs"), { prog });
     }

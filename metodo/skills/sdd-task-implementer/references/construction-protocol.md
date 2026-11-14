@@ -381,8 +381,14 @@
      `smoke-deploy` tier carry `@smoke-deploy` instead, the tag the profile's `smoke` command selects
    - Each criterion's THEN is asserted on its text (`toHaveText`/`toContainText` with the literal the criterion
      quotes); `toBeVisible()` alone proves that an element exists, not what the customer reads
-   - Right after that assert, capture the screen for the criterion with `captureCriterion` (below): one image per
-     criterion of every REQ-F, since without it the acceptance ledger reads the criterion as `unshown`
+   - Right after that assert, capture the screen for the criterion with `captura(page, testInfo, id, { ve: [...] })`
+     (below), passing the texts of the criterion's `- Se ve:` line(s): one image per criterion of every REQ-F, taken
+     in the test whose title cites that criterion (not in a `test.step` of another test: the ledger does not count
+     it), never right after a check by API or CSV (`request.get`, `fetch(`) without an on-screen assert in between.
+     A criterion with `- No visible:` gets no capture. Without an image the ledger reads the criterion as `unshown`.
+     `sdd lint --captures --fase N` finds these mistakes before the acceptance: leave it without errors
+   - Every E2E bound to a REQ-F criterion records its video (`video: 'on'`, the fixture below), so the ledger lists
+     criterion → video (Stack Profile `criterion_video`, default warn)
    - The title of a journey test carries its workflow id (`WF-NNN`, or `FASE-N` when the FASE names no workflow):
      the video helper names the video after it, and `sdd gate --fase N` looks for that id in the file name
    - `visual_evidence` (Stack Profile): `required` and `warn` capture alike (`warn` only changes what the ledger
@@ -466,16 +472,30 @@ criterion ids in the test name.
 
 ```typescript
 // tests/e2e/fixtures/evidence.ts
-import { test as base, type Page, type TestInfo } from '@playwright/test';
+import { test as base, expect, type Page, type TestInfo } from '@playwright/test';
+import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { evidenceDir } from '../../../playwright.config';
 
-// One image per criterion: evidencias/FASE-{N}/AC-004-01.png (or REQ-F-081-AC1.png without specifications)
-export async function captureCriterion(page: Page, testInfo: TestInfo, criterion: string) {
-  const file = path.join(evidenceDir, `${criterion.replace(/\s+/g, '-')}.png`);
+// One image per criterion: evidencias/FASE-{N}/AC-004-01.png (or REQ-F-081-AC1.png without specifications).
+// `ve`: the texts of the criterion's «Se ve:» line(s), with the actor's data in a template («Hola, {usuario}» →
+// `Hola, ${usuario}`). Each one is asserted visible BEFORE the screenshot, and a sidecar AC-004-01.json records what
+// was checked (test, texts, url, the image's sha256): the acceptance compares it with the «Se ve:» line, and the OCR
+// is only a second opinion. Call it from the test whose title cites the criterion, never from a test.step of another.
+export async function captura(page: Page, testInfo: TestInfo, criterion: string, { ve = [] as string[] } = {}) {
+  for (const texto of ve) await expect(page.getByText(texto, { exact: false }).first()).toBeVisible();
+  const id = criterion.replace(/\s+/g, '-');
+  const file = path.join(evidenceDir, `${id}.png`);
   await page.screenshot({ path: file, fullPage: true });
+  const sha256 = 'sha256:' + createHash('sha256').update(readFileSync(file)).digest('hex');
+  writeFileSync(path.join(evidenceDir, `${id}.json`), JSON.stringify({
+    criterio: criterion, test: testInfo.titlePath.slice(1).join(' › '), titulo: testInfo.title,
+    ve, url: page.url(), imagen: `${id}.png`, sha256, at: new Date().toISOString(),
+  }, null, 1));
   await testInfo.attach(criterion, { path: file, contentType: 'image/png' });
 }
+export const captureCriterion = captura; // older suites call it by this name (without `ve`: nothing is asserted)
 
 // One video per test, named after its workflow: the first WF-NNN of the title, or the id set with
 // test.use({ videoId: 'WF-004' }); without either, FASE-{N}. evidencias/FASE-2/WF-004-AC-004-01-create-a-task.webm

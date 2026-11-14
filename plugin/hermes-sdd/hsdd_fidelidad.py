@@ -10,7 +10,10 @@ tests y evidencias, y de que los tests no se cambian para que todo encaje.
                además se buscan señales de debilitamiento (aserciones quitadas o relajadas, .skip, reintentos…)
   vinculos     cada test que cita un criterio (por su escenario o por «REQ-… ACn») tiene que contener sus textos exactos
                «…»: si le faltan los del THEN, cita el criterio sin comprobarlo
-  capturas     el OCR (Vision de macOS) de cada captura de un criterio tiene que enseñar los textos «…» de su THEN
+  capturas     cada captura de un criterio enseña lo que su línea «Se ve:» promete: primero lo que el test comprobó en
+               pantalla (el JSON del helper junto al PNG), después el OCR (Vision de macOS) como segunda opinión; sin
+               «Se ve:», los textos «…» de su THEN; sin nada comprobable, «captura sin comprobar»
+  lint_capturas  `sdd lint --captures` (captura tras API, captura de un test que no cita el criterio, ids que no existen)
   coherencia   ejemplos que contradicen lo que dicen de sí mismos («x» (8 caracteres), «jueves 2026-11-12») y
                referencias a escenarios o requisitos que ya no existen
 
@@ -22,6 +25,7 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -71,9 +75,35 @@ VERBOS_VER = (r"\b(ve|ven|ver|vea|muestra|muestran|aparece|aparecen|mensaje|etiq
 
 
 def partes(texto: str) -> tuple[str, str]:
-    """(GIVEN+WHEN, THEN) de un criterio."""
-    m = re.search(r"\bTHEN\b", texto)
+    """(GIVEN+WHEN, THEN) de un criterio (THEN o ENTONCES)."""
+    m = re.search(r"\b(?:THEN|ENTONCES)\b", texto)
     return (texto[:m.start()], texto[m.end():]) if m else (texto, "")
+
+
+def plantilla_partes(t: str) -> list[str]:
+    """Las partes fijas de una plantilla («Hola, {usuario}» → ["Hola,"]): lo que no cambia con quién la lee."""
+    return [x.strip() for x in re.split(r"\{[^{}]+\}", t) if re.search(r"\w", x)]
+
+
+def se_ve(c: dict) -> tuple[list[tuple[str, bool]], str | None] | None:
+    """El contrato «Se ve» del criterio (líneas «- Se ve: "…" en <pantalla>» / «- No visible: <motivo>» bajo él, que
+    el método deja en `sees`): ([(texto, es_plantilla)], motivo de No visible), o None si el criterio no lo tiene."""
+    s = c.get("sees")
+    if not s:
+        return None
+    return [(t["text"], bool(t.get("template"))) for t in s.get("texts") or []], s.get("none")
+
+
+def en_texto(lit: str, texto: str) -> bool:
+    """¿Está `lit` en `texto` (OCR o lo comprobado), como palabras enteras? Sin espacios solo si es largo: el OCR junta
+    o separa palabras, pero un «No» sin espacios está en cualquier sitio («Nombre», «noviembre»)."""
+    a, t = norm(lit), norm(texto)
+    if not a:
+        return True
+    if re.search(r"(?<![a-z0-9])" + re.escape(a) + r"(?![a-z0-9])", t):
+        return True
+    a2 = a.replace(" ", "")
+    return len(a2) >= 8 and a2 in t.replace(" ", "")
 
 
 # ── 1. tests congelados ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -182,13 +212,25 @@ def vinculos(repo: Path, acc: dict) -> list[dict]:
     for r in acc.get("requirements", []):
         for c in r.get("criteria", []):
             texto = (c.get("text") or "")
-            _, then = partes(texto)
+            dado, then = partes(texto)
             lit_then = literales(then)
             # Los datos del criterio: textos «…» y también fechas (2026-11-14): un recorrido largo que cita muchos
             # criterios contiene casi todos los textos, pero no hace el caso del criterio si usa otro día (sala,
             # REQ-F-015 AC1: el viaje de la FASE-3 desbloqueaba el 2026-11-15 y contaba como prueba del 2026-11-14)
             fechas = sorted(set(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", re.sub(r"«[^»]*»", "", texto))))
             lit_todo = literales(texto) + fechas
+            sv = se_ve(c)
+            if sv:
+                # Con «Se ve», los textos tienen tipo: lo que se ve es texto exacto, un {dato} es plantilla (no se exige
+                # entero) y lo que el GIVEN/WHEN ya cita es dato del ejemplo, que el test puede cambiar (otro actor)
+                datos = set(literales(dado))
+                # «Hola, lucia» en el THEN es un caso de la plantilla «Hola, {usuario}»: dato del ejemplo también
+                casos = [re.compile("^" + ".+".join(re.escape(norm(p)) for p in re.split(r"\{[^{}]+\}", x)) + "$")
+                         for x, plantilla in sv[0] if plantilla]
+                lit_then = [x for x, plantilla in sv[0] if not plantilla] + \
+                    [x for x in lit_then if x not in datos and not any(c.match(norm(x)) for c in casos)]
+                lit_then = list(dict.fromkeys(lit_then))
+                lit_todo = lit_then + fechas
             if not lit_todo:
                 continue
             cuerpos = [(t, _cuerpo_test(repo, t.get("file", ""), t.get("name", ""))) for t in c.get("tests", [])]
@@ -232,29 +274,82 @@ def _en_alcance(acc: dict, r: dict) -> bool:
     return not s or r.get("id") in s
 
 
+def _sidecars(repo: Path, dir_: str) -> tuple[dict, dict]:
+    """Los JSON que deja el helper de captura junto a cada PNG (`captura(page, info, id, { ve })` →
+    AC-001-02.json: {criterio, test, ve[], url, sha256}), por sha256 de la imagen y por ruta sin extensión."""
+    por_sha, por_ruta = {}, {}
+    base = repo / dir_
+    if not base.is_dir():
+        return por_sha, por_ruta
+    for p in base.rglob("*.json"):
+        try:
+            j = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(j, dict) or not (j.get("test") or j.get("criterio")):
+            continue
+        if j.get("sha256"):
+            por_sha[j["sha256"]] = j
+        por_ruta[str(p.relative_to(repo).with_suffix(""))] = j
+    return por_sha, por_ruta
+
+
+def _imagenes(c: dict) -> list[dict]:
+    """Las imágenes que enseñan el criterio según el libro (`shown_by`; un libro antiguo: las capturas por nombre),
+    con su sha256 cuando el libro lo sabe."""
+    adj = {a["path"]: a for e in c.get("evidence", []) for a in e.get("attachments", []) if a.get("kind") == "image"}
+    adj.update({a["path"]: a for t in c.get("tests", []) for a in t.get("attachments", []) if a.get("kind") == "image"})
+    if "shown_by" in c:
+        return [adj.get(p, {"path": p}) for p in c["shown_by"]]
+    return [a for e in c.get("evidence", []) if e.get("kind") == "capture"
+            for a in e.get("attachments", []) if a.get("kind") == "image" and a.get("present")]
+
+
 def capturas(repo: Path, acc: dict) -> list[dict]:
+    """¿Cada captura enseña lo que promete su criterio? Primero el contrato: lo que el criterio dice que se ve
+    («Se ve:») frente a lo que el test comprobó en pantalla antes de capturar (el JSON del helper); lo que falte, por
+    OCR (segunda opinión). Un criterio sin nada comprobable con captura es un hallazgo «captura sin comprobar», no
+    un silencio (club: 50 de 122 criterios no daban nada al OCR y se saltaban)."""
     out = []
+    por_sha, por_ruta = _sidecars(repo, acc.get("evidence_dir") or "evidencias")
     for r in acc.get("requirements", []):
         if not _en_alcance(acc, r):
             continue
         for c in r.get("criteria", []):
-            _, then = partes((c.get("text") or ""))
-            # Solo lo que el criterio dice que se VE: los textos «…» desde «ve», «mensaje», «etiqueta», «aparece»…
-            # («la reserva queda guardada para «2ºB»» no promete enseñar «2ºB»; «ve … como «Tuya»» sí promete «Tuya»)
-            lit = _visibles(c.get("text") or "")
-            imgs = [a["path"] for e in c.get("evidence", []) if e.get("kind") == "capture"
-                    for a in e.get("attachments", []) if a.get("kind") == "image" and a.get("present")]
-            if not lit or not imgs:
+            imgs = _imagenes(c)
+            if not imgs:
                 continue
-            visto = {x: False for x in lit}
-            for i in imgs:
-                t = norm(ocr(repo / i)).replace(" ", "")
-                for x in lit:
-                    visto[x] = visto[x] or norm(x).replace(" ", "") in t
-            no = [x for x, v in visto.items() if not v]
+            base = {"req": r["id"], "ac": c.get("n"), "prioridad": r.get("priority"), "capturas": [a["path"] for a in imgs]}
+            sv = se_ve(c)
+            if sv and sv[1]:   # «No visible: …»: el criterio dice que no hay nada que ver
+                continue
+            if sv and sv[0]:
+                pedidos, origen = sv[0], "se_ve"
+            else:
+                # Sin contrato (criterios anteriores a él): lo que el texto dice que se VE, desde «ve», «mensaje»,
+                # «aparece»… («queda guardada para «2ºB»» no promete enseñar «2ºB»; «ve … como «Tuya»» sí)
+                pedidos, origen = [(x, False) for x in _visibles(c.get("text") or "")], "criterio"
+            if not pedidos:
+                out.append({**base, "no_se_ve": [], "sin_comprobar": True, "grave": False,
+                            "motivo": "el criterio no dice qué se ve: falta «- Se ve: \"…\" en <pantalla>» o «- No visible: <motivo>»"})
+                continue
+            comprobado = []   # lo que el test afirmó visible antes de capturar (el JSON del helper)
+            for a in imgs:
+                sc = por_sha.get(a.get("sha256") or "") or por_ruta.get(str(Path(a["path"]).with_suffix("")))
+                if sc:
+                    comprobado += [str(v) for v in sc.get("ve") or []]
+            no, por_ocr = [], []
+            for x, plantilla in pedidos:
+                trozos = plantilla_partes(x) if plantilla else [x]
+                if all(any(en_texto(t, v) for v in comprobado) for t in trozos):
+                    continue
+                if imgs and all(any(en_texto(t, ocr(repo / a["path"])) for a in imgs) for t in trozos):
+                    por_ocr.append(x)
+                    continue
+                no.append(x)
             if no:
-                out.append({"req": r["id"], "ac": c.get("n"), "prioridad": r.get("priority"), "capturas": imgs,
-                            "no_se_ve": no, "grave": r.get("priority") == "Must"})
+                out.append({**base, "no_se_ve": no, "origen": origen, "comprobado_por_el_test": sorted(set(comprobado))[:10],
+                            "grave": r.get("priority") == "Must"})
     return out
 
 
@@ -297,9 +392,13 @@ def coherencia(repo: Path) -> list[dict]:
 
 
 # ── 5. mutantes ─────────────────────────────────────────────────────────────────────────────────────────────────────
+NEGACION = re.compile(r"\b(?:does not|doesn't|do not|don't|no longer|not|never|without|ya no|no|nunca|ni|sin)\b", re.I)
+
+
 def _visibles(texto: str) -> list[str]:
-    """Los textos «…» que el criterio dice que se VEN: solo los de las frases del THEN que tienen un verbo de ver
-    («ve el mensaje "x" y "pista-2026" sigue sirviendo para entrar» promete ver "x", no la contraseña)."""
+    """Para criterios SIN el contrato «Se ve» (los anteriores a él): los textos «…» que el criterio dice que se VEN,
+    solo los de las frases del THEN con un verbo de ver («ve el mensaje "x" y "pista-2026" sigue sirviendo para
+    entrar» promete ver "x", no la contraseña). Con «Se ve:» no se adivina nada: manda lo que dice esa línea."""
     _, then = partes(texto)
     out = []
     for frase in re.split(r"\s+(?:and|y|e)\s+(?=[^\"«“]*(?:[\"«“][^\"»”]*[\"»”][^\"«“]*)*$)", then):
@@ -307,12 +406,12 @@ def _visibles(texto: str) -> list[str]:
         # as for "lucia")» compara, no promete verlo (club, FASE-8: la captura de REQ-F-013 AC6 se daba por mala)
         frase = re.split(r"\b(?:THEN|ENTONCES)\b", frase)[-1] if re.search(r"\b(?:WHEN|GIVEN|CUANDO|DADO)\b", frase) else frase
         frase = re.sub(r"\([^()]*\)", " ", frase)
-        # «"carmen" does not appear», «ya no sale»: lo que el criterio promete que NO se ve no se exige en la captura
-        # (club, entrega 2: REQ-F-018 AC2 se daba por mal capturado)
-        if re.search(r"\b(?:does not|doesn't|do not|no longer|not|never|ya no|no|nunca|ni)\s+(?:\w+\s+){0,2}?"
-                     r"(?:appear|show|see|list|contain|aparece|sale|se ve|ve|muestra|figura|lista)",
-                     re.sub(r"[\"«“][^\"»”]*[\"»”]", " ", frase), re.I):
-            continue
+        # Lo que el criterio promete que NO se ve no se exige («"carmen" does not appear», «ya no sale»; club, entrega 2:
+        # REQ-F-018 AC2). Se corta la frase en la negación y vale lo de antes: «ve "x", que no lista "pablo"» promete
+        # "x" (antes se descartaba la frase entera, también "x")
+        neg = NEGACION.search(re.sub(r"[\"«“][^\"»”]*[\"»”]", lambda m: " " * len(m.group(0)), frase))
+        if neg:
+            frase = frase[:neg.start()]
         if re.search(VERBOS_VER, frase):
             out += [x for x in literales(frase) if x not in out]
     return out
@@ -343,10 +442,25 @@ def _muta(texto: str, lit: str) -> str:
     return "\n".join(l if _COMENTARIO.match(l) else l.replace(lit, "MUTANTE") for l in texto.split("\n"))
 
 
+def _comando(cmd: list[str]) -> list[str]:
+    """La suite con poca prioridad y pocos workers: los mutantes corren mientras Hermes trabaja (club: con la máquina a
+    load 12, Hermes perdió un worker). HSDD_MUT_WORKERS (2 por omisión) y HSDD_MUT_NICE (10; 0 = sin nice)."""
+    w = os.environ.get("HSDD_MUT_WORKERS", "2").strip() or "2"
+    cmd = list(cmd)
+    if cmd[:3] == ["npx", "playwright", "test"] and not any(a.startswith("--workers") for a in cmd):
+        cmd.insert(3, f"--workers={w}")
+    elif cmd[:3] == ["npx", "vitest", "run"] and not any(a.startswith("--maxWorkers") for a in cmd):
+        cmd.insert(3, f"--maxWorkers={w}")
+    n = os.environ.get("HSDD_MUT_NICE", "10").strip()
+    if n and n != "0" and shutil.which("nice"):
+        cmd = ["nice", "-n", n, *cmd]
+    return cmd
+
+
 def _ejecuta(copia: Path, cmd: list[str], minutos: int = 10) -> bool:
     """True si la suite pasa."""
     try:
-        return subprocess.run(cmd, cwd=copia, capture_output=True, text=True, timeout=minutos * 60).returncode == 0
+        return subprocess.run(_comando(cmd), cwd=copia, capture_output=True, text=True, timeout=minutos * 60).returncode == 0
     except subprocess.TimeoutExpired:
         return False
 
@@ -362,7 +476,10 @@ def mutantes(repo: Path, copia: Path, acc: dict, solo_must: bool = True) -> list
             continue
         for c in r.get("criteria", []):
             e2e, uni = _ficheros_test(copia, c)
-            for lit in _visibles(c.get("text") or ""):
+            sv = se_ve(c)
+            # con «Se ve», sus textos exactos (una plantilla cambia con el dato: no se muta); sin él, los adivinados
+            vis = ([] if sv[1] else [x for x, plantilla in sv[0] if not plantilla]) if sv else _visibles(c.get("text") or "")
+            for lit in vis:
                 # solo en código, no en comentarios (sala: «5ºC» solo estaba en un comentario de account-rules.js)
                 con = [p for p in fuentes if any(lit in l for l in _codigo(p))]
                 # e2e que contienen el texto aunque el método no los enlace a este criterio
@@ -408,6 +525,20 @@ def mutantes(repo: Path, copia: Path, acc: dict, solo_must: bool = True) -> list
     return out
 
 
+def lint_capturas(repo: Path, fase: str | None = None) -> list[dict]:
+    """`sdd lint --captures` del método (antes de aceptar): captura tras una comprobación por API sin aserción en
+    pantalla, captura tomada por un test que no cita su criterio (club, REQ-F-008 AC4), una imagen para muchos
+    criterios, ids citados que no existen. Los errores son graves."""
+    r = subprocess.run(["node", str(SDD), "lint", "--captures", "--json", *(["--fase", str(fase)] if fase else [])],
+                       cwd=repo, capture_output=True, text=True)
+    try:
+        hs = json.loads(r.stdout or "{}").get("findings") or []
+    except json.JSONDecodeError:
+        return []
+    return [{"codigo": h.get("code"), "fichero": h.get("file"), "linea": h.get("line"), "req": h.get("req"), "ac": h.get("ac"),
+             "mensaje": h.get("message"), "grave": h.get("severity") == "error"} for h in hs]
+
+
 def _ultima_aceptacion(repo: Path) -> str | None:
     """La aceptación más reciente (fase-N-accepted o entrega-N) alcanzable desde HEAD."""
     r = subprocess.run(["git", "-C", str(repo), "describe", "--tags", "--abbrev=0", "--match", "fase-*-accepted",
@@ -422,7 +553,7 @@ def de_aceptacion(repo: Path, fase: str | None, con_mutantes: bool = True) -> di
     acc = aceptacion(repo, fase)
     res = {"repo": str(repo), "fase": fase, "sha": git(repo, "rev-parse", "--short", "HEAD").strip(),
            "congelados": congelados(repo, _ultima_aceptacion(repo)), "capturas": capturas(repo, acc), "coherencia": coherencia(repo),
-           "vinculos": [x for x in vinculos(repo, acc) if x.get("grave")]}
+           "vinculos": [x for x in vinculos(repo, acc) if x.get("grave")], "lint_capturas": lint_capturas(repo, fase)}
     if con_mutantes and (repo / "src").is_dir():
         copia = Path(tempfile.mkdtemp(prefix="hsdd-mut-")) / "c"
         try:
@@ -437,7 +568,7 @@ def de_aceptacion(repo: Path, fase: str | None, con_mutantes: bool = True) -> di
             subprocess.run(["pkill", "-f", f"{copia}/node_modules/"], capture_output=True)   # servidores que dejaron los e2e
             subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(copia)], capture_output=True)
             shutil.rmtree(copia.parent, ignore_errors=True)
-    res["graves"] = sum(1 for k in ("congelados", "capturas", "mutantes", "vinculos") for x in res.get(k, []) if x.get("grave")) \
+    res["graves"] = sum(1 for k in ("congelados", "capturas", "mutantes", "vinculos", "lint_capturas") for x in res.get(k, []) if x.get("grave")) \
         + sum(1 for x in res["coherencia"] if x.get("grave"))
     f = repo / ".sdd" / "hermes" / f"fidelidad-{fase or 'global'}.json"
     f.parent.mkdir(parents=True, exist_ok=True)
@@ -450,7 +581,7 @@ def todo(repo: Path) -> dict:
     acc = aceptacion(repo)
     return {"repo": str(repo), "sha": git(repo, "rev-parse", "--short", "HEAD").strip(),
             "congelados": congelados(repo), "vinculos": vinculos(repo, acc),
-            "capturas": capturas(repo, acc), "coherencia": coherencia(repo)}
+            "capturas": capturas(repo, acc), "coherencia": coherencia(repo), "lint_capturas": lint_capturas(repo)}
 
 
 def texto(res: dict) -> str:
@@ -472,8 +603,12 @@ def texto(res: dict) -> str:
                + (f"no comprueba {', '.join('«'+s+'»' for s in x['faltan_then'])} (THEN)" if x['faltan_then'] else "")
                + (f"{'; ' if x['faltan_then'] else ''}sin los datos {', '.join('«'+s+'»' for s in x['faltan_datos'][:4])}" if x['faltan_datos'] else ""))
     if "capturas" in res:
-        bloque("capturas", "Capturas que no enseñan su criterio", lambda x:
+        bloque("capturas", "Capturas que no enseñan su criterio (o sin nada que comprobar)", lambda x:
+               f"{x['req']} AC{x['ac']}: captura sin comprobar ({x['motivo']}) — {', '.join(x['capturas'][:2])}{'…' if len(x['capturas']) > 2 else ''}" if x.get("sin_comprobar") else
                f"{x['req']} AC{x['ac']}: no se ve {', '.join('«'+s+'»' for s in x['no_se_ve'])} en {', '.join(x['capturas'])}")
+    if "lint_capturas" in res:
+        bloque("lint_capturas", "Capturas antes de aceptar (sdd lint --captures)", lambda x:
+               f"{x['fichero']}{':' + str(x['linea']) if x.get('linea') else ''} {x['codigo']}: {x['mensaje']}")
     if "mutantes" in res:
         xs = res["mutantes"]
         L.append(f"\nMutantes (texto que se ve, cambiado en el código): {len(xs)} — "
@@ -503,6 +638,8 @@ if __name__ == "__main__":
         res = de_aceptacion(repo, fa, "--sin-mutantes" not in sys.argv)
     elif cmd in ("vinculos", "capturas"):
         res = {"repo": str(repo), "sha": git(repo, "rev-parse", "--short", "HEAD").strip(), cmd: globals()[cmd](repo, aceptacion(repo))}
+    elif cmd == "lint_capturas":
+        res = {"repo": str(repo), "sha": git(repo, "rev-parse", "--short", "HEAD").strip(), cmd: lint_capturas(repo)}
     elif cmd == "mutantes":   # mutantes <repo> <copia>: la copia es un worktree con node_modules (se modifica y se restaura)
         copia = Path(sys.argv[3]).resolve()
         res = {"repo": str(repo), "sha": git(repo, "rev-parse", "--short", "HEAD").strip(),

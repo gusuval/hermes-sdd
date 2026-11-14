@@ -68,7 +68,8 @@ Rules:
 4. Actively look for the production path that bypasses the implementation: another route, another caller, a
    component nobody mounts, the real provider versus the mock the tests use, a replay or two concurrent requests.
 5. Read the captures in {evidence_dir}/FASE-{N}/ named after each criterion (AC-NNN-NN.png or REQ-F-NNN-ACn.png)
-   and check that they show the criterion's literal (the text, the state, the screen). A capture of another screen,
+   and check that they show the criterion's literal (the text, the state, the screen): the texts of its `Se ve:`
+   line when it has one (`req show --json` → `criteria[].sees`), else the literal of its THEN. A capture of another screen,
    an error page, a loading state or the weakened text is a WRONG-CAPTURE finding. A missing capture is not your
    finding: the ledger already marks that criterion `unshown`.
 
@@ -97,6 +98,24 @@ Categories:
 | `NOT-IMPLEMENTED` | does not implement the behaviour at all |
 | `SPEC-QUESTION` | cannot meet the criterion as written, or the criterion contradicts another: a question for a person |
 | `WRONG-CAPTURE` | captures a screen that does not show the criterion's literal |
+
+### 3b. The capture verifier: every capture of the FASE at once
+
+Besides the verifiers per FASE, one more Agent per FASE (same subagent type, same rules 1-2) looks only at captures,
+all of them: a capture mistake is almost always a pattern (checked by API and captured afterwards, captured in a
+`test.step` of another test, one screen for many criteria), and a verifier that sees 15 criteria finds one instance
+per round while the rest of the FASE keeps the same mistake (club: FASE-7 rejected twice for one rule on two
+captures). Run `node "$SDD" lint --captures --fase N --json` first and hand its findings to this verifier; give it
+the full table, one row per REQ-F criterion in scope, from `.sdd/adversarial-plan.json`:
+
+| REQ / AC | Se ve (the `sees` texts and screen, or `No visible`) | Images (`shown_by`) | Not counted (`unbound_captures`) | Test that took it | Video |
+|---|---|---|---|---|---|
+
+Its prompt is the template above with rule 5 only, plus: «Open every image of the table. For each row, the texts of
+`Se ve` must be readable in the image, on the screen it names, with the GIVEN's data (the actor, the date). When a
+row fails, name the rule it breaks and list EVERY row of the table that breaks the same rule, each as its own
+WRONG-CAPTURE line, not only the first.» A criterion without `sees` is checked against the literal of its THEN and,
+when it has none, reported as `SPEC-QUESTION` («the criterion does not say what is seen»), not guessed.
 
 A clean verdict needs evidence too (the assertion and the production line it covers), so an empty answer is never
 read as clean: a criterion missing from the answer is sent again to a new verifier.
