@@ -327,7 +327,7 @@ Fixtures: tests/e2e/fixtures/{fixture}.ts
 **Structure (Playwright):**
 
 ```typescript
-import { test, expect, captureCriterion } from './fixtures/evidence';   // construction-protocol.md → Evidence helper
+import { test, expect, captura } from './fixtures/evidence';   // construction-protocol.md → Evidence helper
 
 // Auth fixture: reuse storageState for all tests except the login test itself
 test.use({ storageState: './tests/e2e/.auth/user.json' });
@@ -419,7 +419,8 @@ export class LoginPage {
 - Every criterion of a REQ-F gets its capture right after its assert (`captura(page, testInfo, id, { ve })` with the
   texts of its `Se ve:` line, in the test whose title cites it, never right after a check by API), and the suite records one
   video per test (config and helper: `references/construction-protocol.md`); without the image the acceptance ledger
-  reads the criterion as `unshown` and the requirement cannot be VERIFIED
+  reads the criterion as `unshown` and the requirement cannot be VERIFIED. `sdd lint --captures --fase N` finds a
+  capture taken right after an API check or by a test whose title does not cite its criterion: leave it without errors
 - Wait for stable state before interacting (no arbitrary `page.waitForTimeout()`)
 - E2E tests require a running server — prefer the suite's own `webServer`; otherwise the server helper of `references/stack-profile.md` §8 (`{server}`, log `.sdd/server.log`, stopped at the end of the block)
 - When an acceptance suite already exists (`acceptance` key, `acceptance/playwright.config.*`, `e2e/`, `test/system/`) write the scenario inside it and never scaffold a new one; the task is done when `{acceptance} --grep <E2E-ID>` passes

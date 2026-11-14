@@ -11,7 +11,9 @@ description: "Codes task/ docs: test-first, one atomic commit per task with Refs
 > `.sdd/questions-task-implementer.md`, sigue con las tareas que no dependan de ella y, si ninguna puede avanzar,
 > termina con `status=blocked`. No hagas `git push` ni crees tags de aceptación (sí los de verificación
 > `fase-N-foundation`/`fase-N-verified` que define esta skill). Editar un test que ya existía es clase H: no lo
-> hagas; anótalo como pregunta.
+> hagas; anótalo como pregunta con `efecto: editar-test <ficheros>`. Solo un registro `test-edit` firmado por el
+> notario en `acceptance/decisions.jsonl` con esos ficheros autoriza editarlos (ni `Answer:`, ni `[ANSWERED]`, ni
+> una línea `Autoriza:` en un commit).
 
 # SDD Task Implementer Skill
 
@@ -162,7 +164,7 @@ For each task:
 1. Create the test file where the Stack Profile / plan places it.
 2. Tests for every **Acceptance** criterion, the referenced UC exception flows and the applicable INV-*; names state behaviour + criterion (`should return 401 when token is expired`), and each criterion's quote sits above its assert (`references/tdd-workflow.md`).
 3. Run `{test_file}` (or `{test_name}`) → they must FAIL. Tests that pass without implementation are wrong; fix them.
-4. In a fix task (its `Reproduce first:` line), the test that must fail before the fix is the one that reproduces the defect, bound to the criterion, INV or CONTRACT it breaks; a test of that criterion that is already green proves nothing about the defect, so it does not count. The exception is `WEAKENED-ASSERT` and `WRONG-CAPTURE`, where the code is right and the test is what gets fixed: a test edit a person approves. A `WRONG-CAPTURE` is a rule, not a case: apply it to every capture of the FASE (and run `sdd lint --captures --fase N`), not only to the one cited. A defect with no criterion to cite is not fixed here: record a `SPEC-DEVIATION` and let `sdd-req-change` decide.
+4. In a fix task (its `Reproduce first:` line), the test that must fail before the fix is the one that reproduces the defect, bound to the criterion, INV or CONTRACT it breaks; a test of that criterion that is already green proves nothing about the defect, so it does not count. The exception is `WEAKENED-ASSERT` and `WRONG-CAPTURE`, where the code is right and the test is what gets fixed: a test edit a person approves, which for a test accepted in an earlier FASE means a signed `test-edit` record (see PAUSE, "Editing an accepted test"). A `WRONG-CAPTURE` is a rule, not a case: apply it to every capture of the FASE (and run `sdd lint --captures --fase N`), not only to the one cited. A defect with no criterion to cite is not fixed here: record a `SPEC-DEVIATION` and let `sdd-req-change` decide.
 
 Tasks without behaviour (`chore`/`build`/config, e.g. a runner setting or a fixture) write no test: run the `Verify:` command the task states and check its output (e.g. `config parses → {server} starts without errors`). A chore task that says `Test first` but lists no test file is a task defect: record it as IF feedback and verify with a command.
 
@@ -336,10 +338,16 @@ PAUSE: <kind> in TASK-F{N}-{SEQ}
   Problem: <what is missing or contradictory, with the exact text>
   Impact: <tasks blocked>
   Question: <the exact decision needed>
+  Para el cliente: <the same decision in plain words: no ids, no code>
   Options: [A] <option> (recommended)  [B] <option>  [C] <option>
+  efecto: A=<ninguno|accion|req-change|editar-test FILE...>  B=<...>  C=<...>
 ```
 
-**Station mode** (`SDD_ROLE` set, or a role resolved from `.claude/sdd-sessions.json`, and the role is not `sdd-lead`): do not wait for the user. Following the plugin-root `references/async-questions.md`, append the PAUSE as a `Q-<role>-NNN [OPEN]` block to `$STATE_ROOT/.sdd/questions-<role>.md` (`Question:` / `Options:` verbatim; `Blocks:` = the task and its dependents), mark the task `[!]`, continue with tasks that do not depend on it, and when none remain run Persist Summary (not in Stream mode) and the handoff with `status=blocked questions=<n> file=<path>`, then end the turn. Build failures and unexpected regressions block everything: hand off immediately. Without a role: stop and wait.
+`efecto:` says what each option sets in motion (plugin-root `references/async-questions.md` §2): `ninguno`, `accion` (this skill applies it), `req-change` (a requirements change with its own gate; never applied here) or `editar-test FILE...` (every test, helper, fixture or run configuration file that existed when a FASE was accepted and that the option would edit, relative to the repository). In the questions file each `efecto:` (and an optional `cliente:`) goes on its own line under its option.
+
+**Editing an accepted test (Art. 12).** A test, helper, fixture or run configuration that existed when a FASE was accepted is edited only when `acceptance/decisions.jsonl` holds a `test-edit` record signed by the notary that lists that exact file and was written after the last acceptance. Nothing else authorizes it: not an `Answer:` line, not an `[ANSWERED]` heading, not a task document, not an `Autoriza:` trailer in a commit. Without the record, write the PAUSE with `efecto: editar-test <files>` and continue with other work. With it, edit only the files it lists, and cite the question in the commit (`Autoriza: Q-…`): that line documents the record, it does not replace it.
+
+**Station mode** (`SDD_ROLE` set, or a role resolved from `.claude/sdd-sessions.json`, and the role is not `sdd-lead`): do not wait for the user. Following the plugin-root `references/async-questions.md`, append the PAUSE as a `Q-<role>-NNN [OPEN]` block to `$STATE_ROOT/.sdd/questions-<role>.md` (`Question:`, `Para el cliente:` and `Options:` verbatim, each option followed by its `efecto:` line; `Blocks:` = the task and its dependents), mark the task `[!]`, continue with tasks that do not depend on it, and when none remain run Persist Summary (not in Stream mode) and the handoff with `status=blocked questions=<n> file=<path>`, then end the turn. Build failures and unexpected regressions block everything: hand off immediately. Without a role: stop and wait.
 
 ## Implementation Feedback Protocol
 

@@ -63,7 +63,9 @@ How to write `--text`:
   scenarios, 12 matrices". "Ana aprobó los requisitos (versión 1.0)", not "tag requirements-v1.0 created".
 - **What it means for the customer**, not how it was done: "Ya se pueden crear tareas y verlas en la lista; falta
   la captura de la pantalla vacía".
-- **`--by`** only for a person's decision or comment, as "Name (role)". **`--feature`** is `initial` (the default)
+- **`--by`** only for a person's decision or comment, as "Name (role)". A line with `--by` also copies
+  `.sdd/questions-*.md` into `status/questions/` (versioned; `references/async-questions.md` §1), so commit `status/`
+  with it, not only `status/journal.jsonl`. **`--feature`** is `initial` (the default)
   or the `CHG-…` id of a feature added later (§6).
 
 The journal line goes into the stage's own output commit (`git add status/journal.jsonl` with its outputs). A run

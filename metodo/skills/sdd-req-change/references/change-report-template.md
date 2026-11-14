@@ -50,6 +50,11 @@ Previous statement, reason, migration steps, sections removed per document.
 | From | To | Type | Status |
 |------|----|------|--------|
 
+### 4.4 Stale Documents (`sdd lint --stale`)
+| Document | Finding (S-01 old text / S-02 missing id) | Resolution (updated / marked «Desfasado por {CHG-ID}») |
+|----------|-------------------------------------------|--------------------------------------------------------|
+{Every finding of Phase 7's `lint --stale`, resolved; the run ends at exit 0.}
+
 ## 5. Alignment Audit Results
 {Phase 7 results, alignment-audit-checklist.md §3 Step 4 format; open items listed here.}
 

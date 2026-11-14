@@ -25,7 +25,7 @@ Reconciliation {date} — DIV-{NNN} ({type}, confidence {level}).
 | Operation | `spec/contracts/API-{module}.md`, following the module's `Style` (operations: behaviour, inputs, outputs, errors; http: plus method, path, status codes) |
 | Entity / rule | `spec/domain/02-ENTITIES.md`, `spec/domain/05-INVARIANTS.md` (`INV-{AREA}-NNN`) |
 | NFR | `spec/nfr/{PERFORMANCE,LIMITS,SECURITY,OBSERVABILITY}.md` |
-| Trace | new row in `spec/TRACEABILITY-MATRIX.md` |
+| Trace | regenerate `spec/TRACEABILITY-MATRIX.md` (`sdd trace matrix --out spec/TRACEABILITY-MATRIX.md`) |
 
 Each item carries `Reconciled: {date}, CR-{NNN}`.
 

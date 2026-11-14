@@ -29,6 +29,7 @@ import {
   JOURNAL_FILE, KINDS, DEFAULT_FEATURE, makeEntry, readJournal, appendEntry, projectLang, isoSecond, plainStage,
   skipText, routeDecisionText,
 } from "./journal.mjs";
+import { syncQuestions } from "./questions.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const SCHEMA = "sdd-status-v1";
@@ -85,6 +86,8 @@ function cmdJournal(o) {
     if (o._.length) usage(`unexpected argument ${o._[0]}`);
     const r = appendEntry(root, { stage: o.stage, kind: o.kind, text: o.text, feature: o.feature, refs: o.refs, by: o.by, at: o.at });
     if (r.errors.length) { for (const e of r.errors) console.error(`${PROG}: journal add: ${e}`); return 2; }
+    // A person's decision (--by): the questions it answered travel in the same status/ commit (questions.mjs)
+    if (o.by) syncQuestions(root);
     if (o.json) out(JSON.stringify({ file: JOURNAL_FILE, line: r.line, entry: r.entry }, null, 2));
     else out(`journal: ${r.entry.kind} ${r.entry.stage} added at ${JOURNAL_FILE}:${r.line}`);
     return 0;

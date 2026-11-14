@@ -254,7 +254,7 @@ RETURN the same JSON, with "ids_used":{"ADR":[…],"SPEC":[…],"PROP":[…]} an
 7. **`DERIVED-SPECS.md`** from the `derived` rows grouped by pattern, plus every `inv_new` (Tier 2) and every `tier1`
    entry marked `[PENDING REQ]`. More than 3 Tier 1 entries → alert the user before proceeding.
 8. **`CLARIFICATIONS-PENDING.md`** from the `gaps` rows (always written, even empty).
-9. **`TRACEABILITY-MATRIX.md`** from the ledger plus `ids_used` / `ids_ref` — a pure join, no re-reading.
+9. **`TRACEABILITY-MATRIX.md`** generated, not written: `sdd trace matrix --out spec/TRACEABILITY-MATRIX.md` (it joins the `Refs` of the files just written).
 10. `README.md`, `RESEARCH-QUESTIONS.md`, the `EVENTS-*` / `PERMISSIONS-MATRIX` declarations, then the
     **Self-Validation Gate** (grep/wc only) and **Persist Summary** with
     `metrics.mode = "fanout"`, `metrics.spec_agents = {N}`.

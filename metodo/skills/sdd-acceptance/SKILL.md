@@ -252,13 +252,13 @@ LLM critic's gaps). Then write the customer's journal lines (plugin-root `refere
 `done` line in plain words (`--kind done --stage acceptance`: what is now shown and what is still missing, e.g. "5
 de 6 peticiones de la entrega 1 ya se pueden ver funcionando; falta la captura de la lista vacía") and an
 `evidence` line when this run added captures, videos or measurements. Commit them with what this run wrote under
-`acceptance/` (the report and any records appended by `--remeasure`), as every stage commits its outputs
+`acceptance/` (the report, its `evidence-manifest-*.json` — path, sha256 and size of every capture and video used, written by `accept --report` because `evidencias/` is not versioned — and any records appended by `--remeasure`) and `status/` (the journal and `status/questions/`, the versioned copy of the questions), as every stage commits its outputs
 (plugin-root `references/git-conventions.md`, § Stage outputs are committed). The report names the SHA it
 evaluated, so a later reader can tell whether it is current, and the commit touches no code path, so it does not
 age the evidence:
 
 ```bash
-git add acceptance/ status/journal.jsonl
+git add acceptance/ status/
 git diff --cached --quiet || git commit -m "docs(acceptance): acceptance report at {sha7}" --trailer "Refs: <evaluated REQ ids>"
 ```
 

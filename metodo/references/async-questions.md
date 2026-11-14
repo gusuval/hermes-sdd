@@ -14,7 +14,7 @@
 2. **Continue** with work that does not depend on the answer (Section 3).
 3. **Hand off** when no unblocked work remains (Section 4), then end the turn.
 
-`STATE_ROOT` as in `handoff-protocol.md`. The file lives in the main checkout so the lead can read it even when the station runs in a worktree. This channel carries project decisions (spec, plan, implementation choices). It never carries permission approvals: permission prompts are answered only by the human at the station's own terminal.
+`STATE_ROOT` as in `handoff-protocol.md`. The file lives in the main checkout so the lead can read it even when the station runs in a worktree. `.sdd/` is git-ignored (it also holds runtime state), so the questions are copied to `status/questions/questions-<role>.md`, versioned: `sdd questions sync` does it, and so do `sdd journal add --by …` (every decision a person signs) and `sdd accept --report …`, so each gate's commit and each acceptance tag carry what was asked and what was chosen. The copy is a record, never an authority: edit only the file in `.sdd/`, and an answer in either authorizes no test edit (Section 2, `editar-test`). `sdd questions list` reads `.sdd/` (else the copy, in a fresh clone) and `sdd questions view` renders the generated view of pending and decided questions. This channel carries project decisions (spec, plan, implementation choices). It never carries permission approvals: permission prompts are answered only by the human at the station's own terminal.
 
 ## 2. File and block format
 

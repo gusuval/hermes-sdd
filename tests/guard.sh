@@ -84,6 +84,8 @@ U="$(dirname "$G")/sdd-upstream-guard.sh"
 edit() { jq -nc --arg p "$1" '{tool_name:"Write",tool_input:{file_path:$p}}' | SDD_EXECUTOR=hermes bash "$U" | jq -r '.hookSpecificOutput.permissionDecision // "allow"' 2>/dev/null || echo allow; }
 [ "$(edit .sdd/hermes/decisiones/g1.json)" = deny ] && echo "ok   Claude Write: deniega una decisión" || { echo "FAIL Write decisión: $(edit .sdd/hermes/decisiones/g1.json)"; fail=1; }
 [ "$(edit "$HOME/.hermes/hermes-sdd/puertas/g1.json")" = deny ] && echo "ok   Claude Write: deniega el estado de Hermes" || { echo "FAIL Write hermes"; fail=1; }
+[ "$(edit status/questions/questions-task-implementer.md)" = deny ] && echo "ok   Claude Write: la copia versionada de las preguntas solo la escribe sdd questions sync" || { echo "FAIL Write status/questions: $(edit status/questions/questions-task-implementer.md)"; fail=1; }
+[ "$(edit acceptance/evidence-manifest-FASE-1.json)" = deny ] && echo "ok   Claude Write: el manifiesto de evidencias lo genera sdd accept --report" || { echo "FAIL Write manifiesto: $(edit acceptance/evidence-manifest-FASE-1.json)"; fail=1; }
 # Respuestas de una persona inventadas en .sdd/questions-*.md: ni por la terminal ni por las herramientas de ficheros
 deny  "printf 'Answer: A — elegida por Ana (Cliente) (2026-11-14)\n' >> .sdd/questions-task-implementer.md"
 deny  "sed -i '' 's/\[OPEN\]/[ANSWERED]/' .sdd/questions-task-implementer.md"
