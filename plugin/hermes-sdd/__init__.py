@@ -73,6 +73,17 @@ def _cargar_lecciones():
 
 
 PL = _cargar_lecciones()
+
+
+def _cargar_textos():
+    import importlib.util, sys
+    if "hsdd_textos" not in sys.modules:
+        spec = importlib.util.spec_from_file_location("hsdd_textos", Path(__file__).with_name("hsdd_textos.py"))
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); sys.modules["hsdd_textos"] = mod
+    return sys.modules["hsdd_textos"]
+
+
+TX = _cargar_textos()
 HOME = N.HOME
 _leer, _escribir, _ahora, _respuestas = N.leer, N.escribir, N.ahora, N.respuestas
 
@@ -189,8 +200,25 @@ def _render(puerta: dict):
     paso = N.paso_actual(puerta)
     extra = "\n\n👀 Ya has visto la demo. Decide:" if (N.escalonada(puerta) and paso == 2) else ""
     jev = N.describir_jev(puerta)
-    return (_cabecera(puerta) + "\n" + puerta.get("texto", "") + (f"\n\n{jev}" if jev else "") + extra,
-            _teclado(puerta, paso))
+    # «👉 … esto lanzará» con lo que la persona va marcando en los botones Q (no solo con las recomendadas)
+    texto = TX.texto_con_lanzara(puerta, _respuestas(puerta))
+    return (_cabe(_cabecera(puerta) + "\n" + texto + (f"\n\n{jev}" if jev else "") + extra), _teclado(puerta, paso))
+
+
+def _cabe(texto: str, n: int = 4000) -> str:
+    """Un mensaje de Telegram admite 4000 caracteres: si no cabe, se recorta lo de en medio y se conservan las preguntas
+    y la línea «esto lanzará» del final, que son lo que deciden los botones Q (taller: la puerta de requisitos tenía
+    4300 y se perdían Q4 y «esto lanzará»)."""
+    if len(texto) <= n:
+        return texto
+    i = texto.find("\n\n❓ ")
+    corte = "\n\n✂️ (recortado: el texto entero está en el panel)"
+    if i < 0 or len(texto) - i > n - 600:
+        return texto[: n - len(corte)].rstrip() + corte
+    cola = texto[i:]
+    cabeza = texto[: n - len(cola) - len(corte)]
+    cabeza = cabeza[: cabeza.rfind("\n")] if "\n" in cabeza else cabeza
+    return cabeza.rstrip() + corte + cola
 
 
 async def _publicar(bot, puerta: dict) -> None:

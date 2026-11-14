@@ -27,10 +27,12 @@ YO = getpass.getuser()
 R = T / "repo"; (R / "evidencias/FASE-0").mkdir(parents=True)
 (R / "evidencias/FASE-0/a.png").write_bytes(b"\x89PNG-a"); (R / "secreto.txt").write_text("no")
 puerta = {"id": "g1", "tipo": "fase", "fase": "0", "tablero": "demo", "repo": str(R), "titulo": "Aceptar FASE-0",
-          "texto": "Sin alertas", "estado": "abierta", "sha": "abc1234", "creada": "2026-01-01T00:00:00Z",
+          "texto": "Sin alertas\n\n👉 Si firmas sin tocar los botones Q, esto lanzará: sin más efecto: Q1.", "estado": "abierta",
+          "sha": "abc1234", "creada": "2026-01-01T00:00:00Z",
           "opciones": [{"verbo": "ver", "etiqueta": "▶ Ver demo", "paso": 1}, {"verbo": "acepto", "etiqueta": "✅ Aceptar", "paso": 2},
                        {"verbo": "rechazo", "etiqueta": "❌ Rechazar", "texto": True, "paso": 2}],
-          "preguntas": [{"n": 1, "id": "Q-a", "opciones": ["A", "B"], "recomendada": "A"}],
+          "preguntas": [{"n": 1, "id": "Q-a", "opciones": ["A", "B"], "recomendada": "A",
+                         "efectos": {"A": {"efecto": "ninguno", "ficheros": []}, "B": {"efecto": "accion", "ficheros": []}}}],
           "telegram": [{"chat": 111, "msg": 7}]}
 (HOME / "puertas/g1.json").write_text(json.dumps(puerta))
 
@@ -59,6 +61,8 @@ ok(c.get(f"{B}/evidencia/g1/..%2Fsecreto.txt").status_code in (404, 409), "no si
 ok(c.get(f"{B}/evidencia/..%2Fx/a.png").status_code in (404, 409), "id de puerta con ruta: rechazado")
 r = c.post(f"{B}/respuesta/g1", json={"n": 1, "letra": "B"}).json()
 ok(r["respuestas"] == {"1": "B"}, "el formulario marca Q1·B")
+ok(r["texto"].endswith("👉 Con lo que has marcado en los botones Q, firmar lanzará: 🛠 lanza trabajo: Q1.") and "Si firmas sin tocar" not in r["texto"],
+   f"«esto lanzará» se recalcula con lo marcado en el panel ({r['texto'][-90:]})")
 ok(c.post(f"{B}/respuesta/g1", json={"n": 1, "letra": "Z"}).status_code == 409, "respuesta fuera de las opciones: rechazada")
 ok(c.post(f"{B}/decidir/g1", json={"verbo": "rechazo", "texto": " "}).status_code == 409, "rechazar exige motivo")
 ok(c.post(f"{B}/decidir/g1", json={"verbo": "ver"}).status_code == 409, "«ver» no es una decisión")

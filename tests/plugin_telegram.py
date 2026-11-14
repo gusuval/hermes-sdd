@@ -88,6 +88,28 @@ async def formulario_y_operacion():
     q = Query("g:conforme:t_2", 111); await m._on_boton(NS(callback_query=q), ctx)
     d = json.loads((R / ".sdd/hermes/decisiones/t_2.json").read_text())
     ok(d["texto"] == "Q1: A, Q2: C", f"la decisión lleva las respuestas del formulario ({d['texto']})")
+    # «👉 … esto lanzará» se recalcula con lo marcado en los botones Q (era fijo con las recomendadas)
+    sin = {"efecto": "ninguno", "ficheros": []}
+    pl = {"id": "t_3", "tipo": "requisitos", "tablero": "demo", "repo": str(R), "titulo": "Requisitos",
+          "texto": "📝 Requisitos\n\n👉 Si firmas sin tocar los botones Q, esto lanzará: sin más efecto: Q1, Q2.",
+          "opciones": [{"verbo": "acepto", "etiqueta": "✅ Apruebo"}], "estado": "abierta",
+          "preguntas": [{"n": 1, "id": "Q-a", "opciones": ["A", "B"], "recomendada": "A",
+                         "efectos": {"A": sin, "B": {"efecto": "req-change", "ficheros": []}}},
+                        {"n": 2, "id": "Q-b", "opciones": ["A", "B"], "recomendada": "A",
+                         "efectos": {"A": sin, "B": {"efecto": "editar-test", "ficheros": ["tests/a.test.js"]}}}]}
+    (HOME / "puertas/t_3.json").write_text(json.dumps(pl))
+    await m._publicar(bot, pl); (HOME / "puertas/t_3.json").write_text(json.dumps(pl))
+    ok(bot.enviados[-1][0].endswith("esto lanzará: sin más efecto: Q1, Q2."), "sin tocar los botones Q: lo de las recomendadas")
+    q = Query("g:q1B:t_3", 111); await m._on_boton(NS(callback_query=q), ctx)
+    q = Query("g:q2B:t_3", 111); await m._on_boton(NS(callback_query=q), ctx)
+    t = bot.editados[-1][0]
+    ok("👉 Con lo que has marcado en los botones Q, firmar lanzará: 📝 abre un cambio de requisitos (antes de seguir te llega su puerta): Q1"
+       " · ✏️ autoriza editar tests que ya existían: tests/a.test.js (Q2)." in t and "Si firmas sin tocar" not in t,
+       f"al pulsar un botón Q se reescribe «esto lanzará» con lo marcado ({t[-200:]})")
+    largo = "📝 Requisitos\n" + "\n".join(f"• requisito {i} " + "x" * 60 for i in range(80)) + "\n\n❓ Antes, una pregunta:\n\n1. ¿?\n\n" + pl["texto"].splitlines()[-1]
+    c = m._cabe(largo)
+    ok(len(c) <= 4000 and c.startswith("📝 Requisitos") and c.endswith(pl["texto"].splitlines()[-1]) and "❓ Antes" in c and "✂️" in c,
+       "un mensaje de más de 4000 caracteres se recorta por en medio: las preguntas y «esto lanzará» siguen")
     # Estado y resumen con proyectos simulados
     async def falso_cli(*a, timeout=60):
         if a[:4] == ("hermes", "kanban", "boards", "list"):
