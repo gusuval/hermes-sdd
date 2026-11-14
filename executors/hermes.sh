@@ -18,12 +18,10 @@ OUT="$DIR/runs/$RUN.txt"; ERR="$DIR/runs/$RUN.err"; USO="$DIR/runs/$RUN.json"
 salir() { local x=${3:-}; [ -n "$x" ] || x='{}'
   jq -nc --arg o "$1" --arg r "$2" --arg run "$RUN" --argjson x "$x" '{outcome:$o, reason:$r, run:$run} + $x'; exit 0; }
 
-if ! mkdir "$LOCK" 2>/dev/null; then
-  otro=$(cat "$LOCK/pid" 2>/dev/null || echo "")
-  [ -n "$otro" ] && kill -0 "$otro" 2>/dev/null && salir busy "ya hay una ejecución viva en este repo (pid $otro)"
-  rm -rf "$LOCK"; mkdir "$LOCK"
-fi
-echo $$ > "$LOCK/pid"; trap 'rm -rf "$LOCK"' EXIT
+# Candado (lib/candado.sh): el de la etapa que nos lanzó o, a mano, uno propio
+. "$ROOT/lib/candado.sh"
+candado_tomar "$REPO" ejecutor "$RUN" || salir busy "ya hay una ejecución viva en este repo ($CANDADO_OTRO)"
+trap candado_soltar EXIT
 
 SKILL=$(printf '%s' "$PROMPT" | sed -nE '1s#^/(sdd-[a-z-]+).*#\1#p')
 TEXTO=$(printf '%s' "$PROMPT" | sed -E '1s#^/sdd-[a-z-]+[^—]*— *##')

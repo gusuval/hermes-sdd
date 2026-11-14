@@ -29,19 +29,14 @@ salir() {  # salir <outcome> <reason> [extra-json]
   exit 0
 }
 
-# ── Candado ──────────────────────────────────────────────────────────────────────────────────────────────────────
-if ! mkdir "$LOCK" 2>/dev/null; then
-  otro=$(cat "$LOCK/pid" 2>/dev/null || echo "")
-  if [ -n "$otro" ] && kill -0 "$otro" 2>/dev/null; then
-    salir busy "ya hay una ejecución viva en este repo ($(cat "$LOCK/run" 2>/dev/null), pid $otro)"
-  fi
-  rm -rf "$LOCK"; mkdir "$LOCK"   # candado huérfano: su dueño ya no existe
-fi
-echo $$ > "$LOCK/pid"; echo "$RUN" > "$LOCK/run"
+# ── Candado (lib/candado.sh): el de la etapa que nos lanzó o, a mano, uno propio ─────────────────────────────────────
+. "$ROOT/lib/candado.sh"
+candado_tomar "$REPO" ejecutor "$RUN" || salir busy "ya hay una ejecución viva en este repo ($CANDADO_OTRO)"
 CPID=""
 limpiar() {
   [ -n "$CPID" ] && kill -TERM -- "-$CPID" 2>/dev/null
-  [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK"
+  rm -f "$LOCK/claude" 2>/dev/null
+  candado_soltar
 }
 trap limpiar EXIT
 trap 'limpiar; exit 143' TERM INT HUP

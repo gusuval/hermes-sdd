@@ -27,6 +27,9 @@ SDD="$ROOT/metodo/scripts/sdd.mjs"; STATE="$ROOT/metodo/scripts/sdd-state.sh"
 REPO=$(cd "$1" && pwd); ETAPA=$2; FASE=${3:-}
 cd "$REPO"
 T0=$(date +%s); HEAD0=$(git rev-parse HEAD 2>/dev/null || echo ""); EJECUCIONES='[]'   # para etapas.jsonl
+SUBPASO=""; S_LLM=0       # el último paso con ejecutor (dónde se quedó si se corta) y los segundos dentro de ejecutores
+AL_TERMINAR=()            # «origen|destino»: lo consumido se marca solo si la etapa termina bien (un reintento lo vuelve a ver)
+. "$ROOT/lib/candado.sh"; CON_CANDADO=false
 # Ejecutor por etapa: .ejecutores[<etapa>] o, si no, .ejecutor (claude | hermes | replay); el modelo, en .modelos[<etapa>]
 # o, si el proyecto no lo fija, el del perfil de modelos global (sdd.json; por defecto «equilibrado»)
 ejecutor() { jq -r --arg e "$1" '.ejecutores[$e] // .ejecutor // "claude"' .sdd/hermes/hermes-sdd.json 2>/dev/null || echo claude; }
@@ -47,21 +50,36 @@ registrar_etapa() {  # una línea por etapa en .sdd/hermes/etapas.jsonl: la lín
       END {printf "{\"tests\":%d,\"codigo\":%d}", t, c}')
   fi
   mkdir -p .sdd/hermes
+  local seg=$(( $(date +%s) - T0 )) carga
+  # carga del sistema (1, 5 y 15 min) al terminar: para medir si las etapas se estorban (macOS: vm.loadavg; Linux: /proc)
+  carga=$({ sysctl -n vm.loadavg 2>/dev/null || cut -d' ' -f1-3 /proc/loadavg 2>/dev/null; } | tr -d '{}' | awk '{printf "[%s,%s,%s]", $1, $2, $3}')
+  jq -e . <<< "${carga:-x}" >/dev/null 2>&1 || carga=null
   jq -nc --argjson res "$(echo "$res" | jq -c . 2>/dev/null || echo '{}')" --argjson ej "$EJECUCIONES" --argjson r "$ratio" \
+    --arg sub "$SUBPASO" --argjson seg "$seg" --argjson sllm "$S_LLM" --argjson carga "$carga" \
     --arg etapa "$ETAPA" --arg fase "$FASE" --arg t "${HERMES_KANBAN_TASK:-}" --arg h0 "$HEAD0" --arg h1 "$head1" \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson min "$(( ($(date +%s) - T0) / 60 ))" --arg resumen "${2:-}" --arg puerta "${3:-}" '
     {ts: $ts, etapa: $etapa, fase: (if $fase == "" then null else $fase end), tarjeta: (if $t == "" then null else $t end),
      resultado: ($res.outcome // null), motivo: ($res.reason // null), resumen: (if $resumen == "" then null else $resumen end),
      puerta: (if $puerta == "" then null else $puerta end), minutos: $min,
      ejecuciones: [$ej[] | .run], coste_usd: ([$ej[] | .cost_usd // 0] | add // 0), turnos: ([$ej[] | .turns // 0] | add // 0),
-     head_antes: $h0, head_despues: $h1, tests_codigo: $r}' >> .sdd/hermes/etapas.jsonl 2>/dev/null || true
+     head_antes: $h0, head_despues: $h1, tests_codigo: $r,
+     subpaso: (if $sub == "" then null else $sub end), segundos: $seg, segundos_sin_llm: ([$seg - $sllm, 0] | max),
+     carga: $carga}' >> .sdd/hermes/etapas.jsonl 2>/dev/null || true
 }
 huerfanos() {  # servidores de este proyecto que dejó una ejecución (vite, el de las pruebas): ocupan el puerto y la
-  # siguiente etapa se pelea con ellos (club, FASE-3: 30 min de e2e colgados hasta matarlos). Solo los de su node_modules.
+  # siguiente etapa se pelea con ellos (club, FASE-3: 30 min de e2e colgados hasta matarlos). Solo los de su node_modules
+  # y solo con el candado del repo en la mano: si otra etapa lo tiene, esos servidores son suyos
+  $CON_CANDADO || return 0
   pkill -f "$REPO/node_modules/" >/dev/null 2>&1 || true
+}
+matar_hijos() {  # matar_hijos <pid>: sus descendientes, de las hojas hacia arriba (el ejecutor mata además su grupo)
+  local h; for h in $(pgrep -P "$1" 2>/dev/null); do matar_hijos "$h"; kill -TERM "$h" 2>/dev/null; done; return 0
 }
 fin() {  # fin <json-del-ejecutor-o-propio> [resumen] [puerta]
   huerfanos
+  if [ "$(echo "$1" | jq -r .outcome 2>/dev/null)" = done ]; then   # lo consumido se da por aplicado ahora, no antes
+    local par; for par in ${AL_TERMINAR[@]+"${AL_TERMINAR[@]}"}; do [ -e "${par%%|*}" ] && mv "${par%%|*}" "${par#*|}"; done
+  fi
   registrar_etapa "$1" "${2:-}" "${3:-}"
   # Etapa resuelta: las tarjetas bloqueadas de intentos anteriores de esta misma etapa quedan obsoletas y se archivan
   if [ "$(echo "$1" | jq -r .outcome 2>/dev/null)" = done ] && [ -z "${HERMES_SDD_SIN_KANBAN:-}" ]; then
@@ -71,8 +89,19 @@ fin() {  # fin <json-del-ejecutor-o-propio> [resumen] [puerta]
   exit 0
 }
 falla() { fin "$(jq -nc --arg r "$1" '{outcome:"failed", reason:$r}')"; }
-
-huerfanos   # restos de una etapa anterior (antes de empezar)
+# Cortada desde fuera (el kanban perdió al worker, un reinicio, Ctrl-C): consta en etapas.jsonl como «interrumpida»,
+# sus hijos (el ejecutor y Claude) mueren con ella y el candado se suelta. Antes no quedaba rastro de esos runs.
+interrumpida() {
+  trap - TERM HUP INT
+  matar_hijos $$
+  huerfanos
+  registrar_etapa "$(jq -nc --arg s "$1" '{outcome:"interrumpida", reason:("señal " + $s)}')"
+  candado_soltar
+  jq -nc --arg s "$1" '{outcome:"failed", reason:("etapa interrumpida (señal " + $s + ")")}'
+  exit 143
+}
+trap 'interrumpida TERM' TERM; trap 'interrumpida HUP' HUP; trap 'interrumpida INT' INT
+trap candado_soltar EXIT
 # ── Antes de gastar nada: ¿el proyecto está en pausa? ¿la cuota de Claude está agotada? ────────────────────────────
 HOME_SDD=${HERMES_SDD_HOME:-$HOME/.hermes/hermes-sdd}
 BOARD=$(basename "$REPO" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')
@@ -83,6 +112,18 @@ if [ "$EJEC" = claude ] && [ -f "$HOME_SDD/cuota.json" ]; then
   R=$(jq -r '.reset_at // 0' "$HOME_SDD/cuota.json")
   [ "$R" -gt "$(date +%s)" ] && fin "$(jq -nc --arg r "$R" '{outcome:"scheduled", reason:"cuota de Claude agotada", reset_at:$r}')"
 fi
+
+# ── Candado del repo para toda la etapa (lib/candado.sh). Si lo tiene una firma, se espera a que acabe (el notario
+#    lanza el tramo siguiente antes de terminar); si lo tiene otra etapa, «busy» sin tocar nada (ni sus servidores).
+ESPERA=0
+until candado_tomar "$REPO" etapa "$ETAPA${FASE:+-$FASE}"; do
+  case "$CANDADO_OTRO" in
+    firma*) [ "$ESPERA" -lt "${HERMES_SDD_ESPERA_CANDADO_S:-600}" ] && { sleep 5; ESPERA=$((ESPERA + 5)); continue; } ;;
+  esac
+  fin "$(jq -nc --arg r "ya hay una ejecución viva en este repo ($CANDADO_OTRO)" '{outcome:"busy", reason:$r}')"
+done
+CON_CANDADO=true; export SDD_CANDADO_PID=$$   # los ejecutores que lance usan este candado
+huerfanos   # restos de una etapa anterior (antes de empezar)
 
 FB=".sdd/hermes/feedback/${ETAPA}${FASE:+-$FASE}.txt"
 PEDIDO=""; [ -s "$FB" ] && PEDIDO=" La persona revisó la propuesta anterior y pidió estos cambios, que son la prioridad de esta ejecución: «$(cat "$FB")»."
@@ -111,7 +152,12 @@ claude_etapa() {  # claude_etapa <clave-de-estado> <prompt>
   head0=$(git rev-parse HEAD)
   # Sandbox de Claude Code en las etapas que no abren un navegador (en macOS no puede arrancar Chromium)
   local sb=1; case "$ETAPA" in implementar|aceptar|cierre|brechas|adoptar|respuestas|mantener) sb=0 ;; esac
-  res=$(SDD_SANDBOX=$sb bash "$ROOT/executors/$EJEC.sh" "$REPO" "$ETAPA${FASE:+-$FASE}" "$2" "$(modelo "$ETAPA")" | tail -1)
+  SUBPASO=$clave
+  local sal t1; sal=$(mktemp); t1=$(date +%s)
+  SDD_SANDBOX=$sb bash "$ROOT/executors/$EJEC.sh" "$REPO" "$ETAPA${FASE:+-$FASE}" "$2" "$(modelo "$ETAPA")" > "$sal" &
+  wait $!   # en segundo plano y con wait: un TERM se atiende ya, no cuando acabe Claude
+  res=$(tail -1 "$sal"); rm -f "$sal"
+  S_LLM=$(( S_LLM + $(date +%s) - t1 ))
   EJECUCIONES=$(jq -c --argjson r "$(echo "$res" | jq -c . 2>/dev/null || echo '{}')" '. + [$r]' <<< "$EJECUCIONES")
   [ "$(echo "$res" | jq -r .outcome)" = done ] || fin "$res" "$(echo "$res" | jq -r .reason)"
   # Post-condición: la etapa no puede quedar a medias en el estado del método
@@ -120,7 +166,9 @@ claude_etapa() {  # claude_etapa <clave-de-estado> <prompt>
     bash "$STATE" set "$clave" stale --reason "el ejecutor terminó sin cerrar la etapa" >/dev/null 2>&1
     fin "$(echo "$res" | jq -c '.outcome="failed" | .reason="la etapa quedó en running: marcada stale"')"
   fi
-  [ -s "$FB" ] && mv "$FB" "$FB.aplicado"
+  # Lo que pidió la persona se da por aplicado cuando la etapa termine bien (fin), no tras el primer ejecutor: si se
+  # corta o falla después, el reintento lo vuelve a recibir (antes el rechazo se perdía)
+  [ -s "$FB" ] && AL_TERMINAR+=("$FB|$FB.aplicado")
   # Los registros solo crecen, y el ejecutor solo puede añadir lo que escribe la CLI: mediciones de un comando
   # (`accept measure`) en decisions.jsonl y hallazgos (`accept challenge add`) en challenges.jsonl. Lo demás es una
   # decisión humana: se para la etapa sin commitear nada y lo ve una persona.
@@ -397,7 +445,7 @@ PY
     [ -s "$FB" ] && RECH=" This FASE comes back with a person's request (a rejection at its acceptance gate or newly approved requirements): all tasks being done does NOT finish it. Treat every point of the person's request above as new work: add the tasks it needs to task/TASK-FASE-$FASE.md and implement them (test-first, one commit each), including the missing captures and the literal letter of each criterion in its test. If a point needs a change to requirements/ or to the plan (outside your reach), do not skip it: write an [OPEN] question in .sdd/questions-task-implementer.md explaining what change is needed."
     OBS=""; [ -s .sdd/hermes/feedback/observaciones.txt ] && OBS=" The person accepted earlier FASEs with these observations, still pending: add a task for each one to task/TASK-FASE-$FASE.md and do it in this FASE too (they may touch earlier FASEs' captures or screens; tests that already existed are not edited — write an [OPEN] question if one would need it): $(cat .sdd/hermes/feedback/observaciones.txt | tr '\n' ' ')"
     claude_etapa task-implementer "/sdd-task-implementer --fase=$FASE — $ARNES Implement FASE-$FASE completely, test-first, one commit per task with Refs:/Task: trailers. Before you finish, check every criterion of the FASE: its test does that criterion's own GIVEN (same actor, same dates and data) and WHEN, and asserts its whole THEN with the exact text; its capture shows the screen where that THEN is visible, with the GIVEN's data on screen; the e2e suites (old and new) are green. [ANSWERED] questions in .sdd/questions-*.md are the person's decisions: apply them and they authorize exactly what they say (for example editing an existing test); do not ask them again; when an answer authorizes editing an existing test, cite that question in the commit message (a line «Autoriza: Q-…»). Write any new question as a block that starts with a line «## Q-task-implementer-NNN [OPEN]» (next free NNN) followed by Question:, Options: and Blocks: lines, as references/async-questions.md says.$TESTS_G$RECH$OBS"
-    [ -n "$OBS" ] && mv .sdd/hermes/feedback/observaciones.txt ".sdd/hermes/feedback/observaciones.aplicadas-$FASE.txt"
+    [ -n "$OBS" ] && AL_TERMINAR+=(".sdd/hermes/feedback/observaciones.txt|.sdd/hermes/feedback/observaciones.aplicadas-$FASE.txt")
     if ! st=$(node "$SDD" tasks status --fase "$FASE" --require-done 2>&1); then
       # Parada en preguntas [OPEN] (p. ej. un criterio que contradice otro): se abren a la persona en una puerta. La
       # tarjeta queda parada para que no corra su hija (Aceptar); al firmar, la FASE se rehace con las respuestas o,
@@ -411,8 +459,8 @@ PY
     fi
     # Un cambio de requisitos que no deja criterios fallando puede no necesitar ningún commit: solo se exige cambio
     # cuando la persona rechazó o hay criterios concretos que arreglar
-    OBLIGA=""; [ -n "$RECH" ] && { ! head -1 "$FB.aplicado" 2>/dev/null | grep -q '^Los requisitos cambiaron' ||
-      grep -q '^Criterios de la FASE que no pasan' "$FB.aplicado" 2>/dev/null; } && OBLIGA=1
+    OBLIGA=""; [ -n "$RECH" ] && { ! head -1 "$FB" 2>/dev/null | grep -q '^Los requisitos cambiaron' ||
+      grep -q '^Criterios de la FASE que no pasan' "$FB" 2>/dev/null; } && OBLIGA=1
     if [ -n "$OBLIGA" ] && [ -z "$(git log --format=%H "$ANTES..HEAD" -- . ':!acceptance' ':!status' ':!.sdd' 2>/dev/null)" ]; then
       falla "la FASE-$FASE volvió con cambios pedidos y la implementación no ha cambiado nada: lo pedido necesita algo que esta etapa no puede hacer (mira .sdd/questions-task-implementer.md)"
     fi
@@ -437,10 +485,10 @@ PY
     fidelidad
     if hay_hallazgos && [ ! -f ".sdd/hermes/fidelidad-arreglo-$FASE" ]; then
       # Una pasada de arreglo, una sola vez por implementación de la FASE; lo que quede llega a la persona en la puerta
-      touch ".sdd/hermes/fidelidad-arreglo-$FASE"
       claude_etapa task-implementer "/sdd-task-implementer --fase=$FASE — $ARNES An independent review of FASE-$FASE found tests or captures that do not prove their criterion, listed below. For each one, add a task to task/TASK-FASE-$FASE.md and fix it (one commit each): the test must do the criterion's GIVEN with its own data and actor, its WHEN, and assert its whole THEN with the exact text; the capture must show the screen where that THEN is visible. Fix the code when it is the code that fails. A test that already existed when an earlier FASE was accepted is NOT edited: write an [OPEN] question in .sdd/questions-task-implementer.md instead. Findings: $(hallazgos)"
       claude_etapa acceptance "/sdd-acceptance --fase $FASE — $ARNES Recompute the verdicts, captures and demo of FASE-$FASE after the fixes. Do not sign off."
       fidelidad
+      touch ".sdd/hermes/fidelidad-arreglo-$FASE"   # hecha: si se cortaba a mitad, el reintento la repite
     fi
     # Mutantes de los Must de la FASE (una vez, sobre lo que verá la persona): lo que encuentren llega a la puerta
     python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" --fase "$FASE" >/dev/null 2>&1 || true
