@@ -149,6 +149,8 @@ Scenarios: `tests/BDD-STORY-NNN.md` (Template 13). Rules: RN-NNN, INV-XXX-NNN (c
 
 ## Template 5: Traceability Matrix (`TRACEABILITY-MATRIX.md`, ≤ 3,000 chars)
 
+> Not written by hand any more: `sdd trace matrix --out spec/TRACEABILITY-MATRIX.md` generates it (Requirement | Spec | FASE | Tasks | Tests | Commits, and the coverage line) from the `Refs` of the documents, the plan, the tasks, the tests and the commits. The layout below is the older hand-written one, kept for reading matrices of earlier projects.
+
 ````markdown
 # Traceability Matrix
 

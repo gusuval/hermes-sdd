@@ -16,6 +16,15 @@
 //   sdd trace req <ID> [--rev R] [--json]                      commits whose Task/Refs/Change contain ID exactly
 //   sdd trace why <file>[:line[-line]] [--json]                blame → commit → trailers → ids (whole file: all commits)
 //   sdd trace delivered <ID> [--rev R] [--json]                commits for ID → tags and branches that contain them
+//   sdd trace matrix [--out spec/TRACEABILITY-MATRIX.md] [--json]
+//       The traceability matrix, generated (scripts/lib/trace-matrix.mjs): per requirement of REQUIREMENTS.md, the spec
+//       ids or files that cite it, its FASEs (plan/fases), tasks (task/), test files (Stack Profile test_paths) and
+//       effective commits. Without --out it prints the Markdown. Never write spec/TRACEABILITY-MATRIX.md by hand.
+//   sdd questions sync | list [--open] [--json] | view [--out FILE]
+//       Async questions (references/async-questions.md; scripts/lib/questions.mjs). sync copies each
+//       .sdd/questions-*.md (git-ignored) into status/questions/ (versioned) when it changed; `journal add --by` and
+//       `accept --report` run it too, so the answers travel with the gate's commit and the tag. list prints them (from
+//       .sdd/, else from the versioned copy); view renders the generated «pending and decided» Markdown view.
 //   sdd verify --message FILE|- [--json]                       validate one commit message (the commit-msg hook)
 //   sdd verify --range A..B [--json]                           validate every commit in a range + squash detection
 //       + Prove-It: a `fix` commit (not exempt, not a merge) that changes files under code_paths and no test file
@@ -63,6 +72,13 @@
 //       the capture id against the enclosing test's title, a test.step does not count; and the ledger's
 //       unbound_captures) · C-04 warning, an id (UC-, REQ-, WF-, AC-) cited in a test that exists in no document. Exit 1
 //       on any error.
+//   sdd lint --stale [--json] [--requirements FILE]
+//       Documents left behind by a requirements change (scripts/lib/stale-lint.mjs), Markdown under spec/, ux/, design/,
+//       test/, plan/, task/: S-01 error, a quoted text ("…", «…», “…”) that an earlier version of REQUIREMENTS.md
+//       quoted (git history) and the current one no longer holds · S-02 error, a REQ- id REQUIREMENTS.md does not have,
+//       or a UC-/WF- id no document defines (heading, file name, first cell of a table row). A document marked in its
+//       first 20 lines «Desfasado por INT-…» (or CHG-/CR-; «Superseded by …») is listed as marked, not checked; the
+//       mark on one line silences that line. Exit 1 on any finding.
 //   sdd lint --floor [--base REF] [--json]
 //       Floor guard (scripts/lib/floor.mjs): was the bar lowered between a base commit and the working tree (plus
 //       untracked files)? Base: --base REF (source flag) · else merge-base of HEAD with the default branch (merge-base;
@@ -85,6 +101,9 @@
 //       2 no base, usage or git error.
 //   sdd accept [--junit PATH...] [--junit-sha SHA] [--fase N] [--out .sdd/acceptance.json|-] [--no-out]
 //              [--report acceptance/ACCEPTANCE-REPORT.md] [--remeasure] [--json]
+//       With --report it also writes acceptance/evidence-manifest-FASE-N.json (-all.json without --fase; versioned,
+//       scripts/lib/evidence-manifest.mjs): path, sha256, bytes and criteria of every capture and video used, since
+//       the evidence dir is not versioned; and runs `questions sync`.
 //       Acceptance ledger: verdict per requirement (DEPRECATED, WAIVED, FAILING, MISSING, VERIFIED) from JUnit tests
 //       named with their scenario id (AC-NNN-NN, or `REQ-X-NNN ACn`), the BDD tags of spec/tests/BDD-*.md and the records
 //       of acceptance/decisions.jsonl. JUnit default: Stack Profile test_report_path, else .sdd/junit/. PATH may be a
@@ -237,7 +256,7 @@
 //
 // Task line grammar (V-19), one line per task, continuation lines indented two spaces:
 //   ^- \[( |x|!)\] TASK-F\d+-\d{3,4}( \[P\])? .+ \| `[^`]+`(, `[^`]+`)*$
-import { readFileSync, readdirSync, existsSync, statSync, realpathSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, statSync, realpathSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -252,6 +271,11 @@ import { runRoute } from "./lib/route.mjs";
 import { runStatus } from "./lib/status.mjs";
 import { parseRequirements } from "./sdd-jev.mjs";
 import { reqHash } from "./lib/acceptance.mjs";
+import { writeManifest } from "./lib/evidence-manifest.mjs";
+import { runQuestions, syncQuestions } from "./lib/questions.mjs";
+import { lintStale } from "./lib/stale-lint.mjs";
+import { buildMatrix, renderMatrix } from "./lib/trace-matrix.mjs";
+import { testPathsOf } from "./lib/quotes.mjs";
 
 const GRAMMAR = /^- \[( |x|!)\] TASK-F\d+-\d{3,4}( \[P\])? .+ \| `[^`]+`(, `[^`]+`)*$/;
 const ID_FORMAT = /^TASK-F\d+-\d{3,4}$/;
@@ -284,6 +308,7 @@ function parseArgs(argv) {
       case "--fase": o.fase = Number(String(take()).replace(/^FASE-/i, "")); break;
       case "--repo": o.repo = take(); break;
       case "--rev": o.rev = take(); break;
+      case "--out": o.out = take(); break;
       case "--state": o.state = take(); break;
       case "--message": o.message = take(); break;
       case "--range": o.range = take(); break;
@@ -700,6 +725,19 @@ function cmdTrace(o) {
     }
     return r.delivered_in.length ? 0 : 1;
   }
+  if (sub === "matrix") {
+    const all = isRepo(repo) ? effectiveCommits(readCommits(repo, { rev })) : null;
+    const rows = buildMatrix({ root: repo, requirements: o.requirements || "requirements/REQUIREMENTS.md", testPaths: testPathsOf(repo),
+      commitsFor: all ? (id) => commitsFor(all, id).filter((c) => c.effective).length : null });
+    if (o.json) { json({ rows }); return 0; }
+    const md = renderMatrix(rows);
+    if (o.out) {
+      const abs = path.resolve(repo, o.out);
+      mkdirSync(path.dirname(abs), { recursive: true }); writeFileSync(abs, md);
+      out(`trace matrix: ${rows.length} requirement(s) written to ${display(abs)}`);
+    } else process.stdout.write(md);
+    return 0;
+  }
   if (sub === "why") {
     const target = o.args[0];
     if (!target) usage("trace why needs <file>[:line]");
@@ -956,6 +994,50 @@ function firstCommand(argv) {
   }
   return { cmd: null, index: -1 };
 }
+// ------------------------------------------------------------------ accept --report: manifest and questions
+/** Value of a `--key V` / `--key=V` option in argv (the last one), or undefined. */
+function optValue(argv, key) {
+  let v;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === `--${key}` && i + 1 < argv.length) v = argv[i + 1];
+    else if (argv[i].startsWith(`--${key}=`)) v = argv[i].slice(key.length + 3);
+  }
+  return v;
+}
+/** After `sdd accept … --report FILE` (not its subcommands): the evidence manifest next to the report and the questions'
+ *  versioned copy, both committed with the report (references/status-page.md; scripts/lib/evidence-manifest.mjs). */
+function afterAcceptReport(argv) {
+  if (["record", "measure", "pack", "challenge", "adversarial"].includes(argv.find((a) => !a.startsWith("-")))) return;
+  const report = optValue(argv, "report");
+  if (!report) return;
+  const root = path.resolve(optValue(argv, "repo") || ".");
+  if (!existsSync(path.resolve(root, report))) return;
+  const f = optValue(argv, "fase");
+  const fase = f === undefined ? null : Number(String(f).replace(/^FASE-/i, ""));
+  const outFile = argv.includes("--no-out") ? null : (optValue(argv, "out") || ".sdd/acceptance.json");
+  let ledger = null;
+  if (outFile && outFile !== "-") { try { ledger = JSON.parse(readFileSync(path.resolve(root, outFile), "utf8")); } catch { ledger = null; } }
+  try {
+    const rel = writeManifest(root, { fase: Number.isInteger(fase) ? fase : null, ledger });
+    if (rel) appendFileSync(path.resolve(root, report), `\n> Evidence manifest: \`${rel}\` (path, sha256 and size of every capture and video used; the evidence dir is not versioned).\n`);
+  } catch (e) { console.error(`${PROG}: accept: evidence manifest not written: ${e.message}`); }
+  try { syncQuestions(root); } catch (e) { console.error(`${PROG}: accept: questions not copied: ${e.message}`); }
+}
+
+// ------------------------------------------------------------------ lint --stale
+function cmdLintStale(argv) {
+  const a = argv.filter((x) => x !== "lint" && x !== "--stale");
+  const root = path.resolve(optValue(a, "repo") || ".");
+  const r = lintStale({ root, requirements: optValue(a, "requirements") || "requirements/REQUIREMENTS.md" });
+  if (a.includes("--json")) console.log(JSON.stringify(r, null, 2));
+  else {
+    for (const f of r.findings) console.log(`${f.file}:${f.line} ${f.code} ${f.message}`);
+    for (const m of r.marked) console.log(`marked ${m.file}: ${m.by}`);
+    console.log(`${PROG}: lint --stale: ${r.summary.files} document(s), ${r.summary.errors} finding(s), ${r.summary.marked} marked as superseded (${r.versions} version(s) of REQUIREMENTS.md, ${r.removed} text(s) no longer in it)`);
+  }
+  return r.findings.length ? 1 : 0;
+}
+
 /** Run the CLI; returns the exit code. `legacy` = the sdd-task-lint.mjs command set (lint|json|status|index). */
 export function run(argv, { prog = "sdd", helpUrl = import.meta.url, legacy = false } = {}) {
   PROG = prog; HELP_URL = helpUrl;
@@ -969,9 +1051,20 @@ export function run(argv, { prog = "sdd", helpUrl = import.meta.url, legacy = fa
       if (argv.includes("--help") || argv.includes("-h")) { try { help(0); } catch (e) { if (e instanceof Exit) return e.code; throw e; } }
       return runFloor([...argv.slice(0, first.index), ...argv.slice(first.index + 1)].filter((a) => a !== "--floor"), { prog });
     }
+    if (first.cmd === "lint" && argv.includes("--stale")) {
+      if (argv.includes("--help") || argv.includes("-h")) { try { help(0); } catch (e) { if (e instanceof Exit) return e.code; throw e; } }
+      return cmdLintStale(argv);
+    }
+    if (first.cmd === "questions") {
+      if (argv.includes("--help") || argv.includes("-h")) { try { help(0); } catch (e) { if (e instanceof Exit) return e.code; throw e; } }
+      return runQuestions([...argv.slice(0, first.index), ...argv.slice(first.index + 1)], { prog });
+    }
     if (["accept", "gate", "loop"].includes(first.cmd) || (first.cmd === "lint" && (argv.includes("--needs") || argv.includes("--quotes") || argv.includes("--captures")))) {
       if (argv.includes("--help") || argv.includes("-h")) { try { help(0); } catch (e) { if (e instanceof Exit) return e.code; throw e; } }
-      return runAcceptance(first.cmd, [...argv.slice(0, first.index), ...argv.slice(first.index + 1)].filter((a) => a !== "--needs"), { prog });
+      const rest = [...argv.slice(0, first.index), ...argv.slice(first.index + 1)].filter((a) => a !== "--needs");
+      const code = runAcceptance(first.cmd, rest, { prog });
+      if (first.cmd === "accept") afterAcceptReport(rest);
+      return code;
     }
     if (first.cmd === "route") {
       if (argv.includes("--help") || argv.includes("-h")) { try { help(0); } catch (e) { if (e instanceof Exit) return e.code; throw e; } }

@@ -105,7 +105,7 @@ Generate the canonical tree of `sdd-specifications-engineer` ("Specification Fol
 | `spec/tests/BDD-UC-NNN.md` | Scenarios from existing tests and use cases |
 | `spec/nfr/PERFORMANCE.md`, `LIMITS.md`, `SECURITY.md`, `OBSERVABILITY.md` | Timeouts, pools, TTLs, rate limits, auth patterns, logging/metrics |
 | `spec/adr/ADR-NNN-{slug}.md` | One per major detected decision (framework, database, auth); status `[INFERRED]` because the rationale is guessed |
-| `spec/TRACEABILITY-MATRIX.md`, `CLARIFICATIONS-PENDING.md`, `VALUE-REGISTRY.md` | REQ → artifacts; open questions; shared values |
+| `spec/TRACEABILITY-MATRIX.md` (generated: `sdd trace matrix --out spec/TRACEABILITY-MATRIX.md`), `CLARIFICATIONS-PENDING.md`, `VALUE-REGISTRY.md` | REQ → artifacts; open questions; shared values |
 
 In seed mode, existing `[IMPORTED]` spec files are extended (add sections, evidence) rather than replaced.
 

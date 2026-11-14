@@ -111,7 +111,7 @@ Templates and ceilings: `document-templates.md`, SKILL.md § Output Budget.
 14. **spec/CLARIFICATIONS-PENDING.md** — Open marker index, always present even if empty (SKILL.md)
 15. **spec/VALUE-REGISTRY.md** — One table of canonical values (Template 14)
 16. **spec/DERIVED-SPECS.md** — Tier 1/2 rows grouped by pattern (Template 15)
-17. **spec/TRACEABILITY-MATRIX.md** — Forward table + coverage line (Template 5)
+17. **spec/TRACEABILITY-MATRIX.md** — generated with `sdd trace matrix --out spec/TRACEABILITY-MATRIX.md` (forward table + coverage line)
 
 ### 6.2 Conditional Deliverables (create only when the condition holds)
 

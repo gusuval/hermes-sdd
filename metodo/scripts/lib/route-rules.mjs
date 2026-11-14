@@ -102,8 +102,12 @@ export function computeFacts({ reqs, needs, profile = {}, root }) {
     needs: needs.filter((n) => n.status !== "out-of-scope").length,
     needs_out: needs.filter((n) => n.status === "out-of-scope").length,
     has_code, has_profile, stack_declared,
+    req_nf_perf: active.filter((r) => r.type === "NF" && PERF_WORDS.test([r.title, r.statement, ...(r.criteria || [])].join(" "))).length,
   };
 }
+
+// A REQ-NF about speed or load: the only reason a small project writes PERF-SCENARIOS.md.
+export const PERF_WORDS = /(latenc|\bp9[059]\b|percentil|\b\d+\s*(ms|milisegundos?|milliseconds?|s|seg|segundos?|seconds?)\b|throughput|\brps\b|req\/s|concurren|\bcarga\b|\bload\b|rendimiento|performance|tiempo de respuesta|response time)/i;
 
 // ── rules ────────────────────────────────────────────────────────────────────
 // A rule lists its triggers: [label, fired]. A factor trigger fires on yes or doubt; its label is the factor label
@@ -155,6 +159,32 @@ export const RULES = {
     return { run: false, reason: "skip: formal specs are skipped and there is no code yet" };
   },
 };
+
+// ── proportion: which optional documents a stage that runs writes ───────────────
+// The club (11/2026) wrote ~144.000 words of documents for 3.070 lines of code, and several of them (TEST-MATRIX-UC-*,
+// PERF-SCENARIOS, a hand-written TRACEABILITY-MATRIX) were never cited again by a task, a test or the code. A stage
+// that runs keeps its core outputs; these extra documents are written only when the project needs them.
+//   test-matrix          test/TEST-MATRIX-UC-*.md (test-planner Mode 2): more than TESTPLAN_REQ_F REQ-F or complex
+//                        state; otherwise the BDD scenarios and the tests named after the criteria are the test plan.
+//   perf-scenarios       test/PERF-SCENARIOS.md (test-planner Mode 3): only with a REQ-NF about speed or load.
+//   traceability-matrix  spec/TRACEABILITY-MATRIX.md: always generated (`sdd trace matrix --out …`), never by hand.
+// A full route (`route --full`) keeps every document as before; only the matrix changes to generated.
+export const ARTIFACTS = ["test-matrix", "perf-scenarios", "traceability-matrix"];
+export function decideArtifacts(facts, factors, { full = false } = {}) {
+  const gen = { make: "generated", reason: "generated with sdd trace matrix --out spec/TRACEABILITY-MATRIX.md, never written by hand" };
+  if (full) return { "test-matrix": { make: true, reason: "full pipeline" }, "perf-scenarios": { make: true, reason: "full pipeline" }, "traceability-matrix": gen };
+  const cs = factors?.complex_state?.value === "yes";
+  const tm = facts.req_f > TESTPLAN_REQ_F || cs;
+  return {
+    "test-matrix": tm
+      ? { make: true, reason: `make: ${facts.req_f > TESTPLAN_REQ_F ? `${facts.req_f} REQ-F (> ${TESTPLAN_REQ_F})` : "complex state"}` }
+      : { make: false, reason: `skip: ${facts.req_f} REQ-F (≤ ${TESTPLAN_REQ_F}) and no complex state; the BDD scenarios and the tests named after the criteria are the test plan` },
+    "perf-scenarios": facts.req_nf_perf > 0
+      ? { make: true, reason: `make: ${facts.req_nf_perf} REQ-NF about speed or load` }
+      : { make: false, reason: "skip: no REQ-NF about speed or load" },
+    "traceability-matrix": gen,
+  };
+}
 
 /** facts + evaluated factors → {stages: {name: {run, reason}}} in STAGE_ORDER. */
 export function decideRoute(facts, factors) {

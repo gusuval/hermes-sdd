@@ -95,6 +95,9 @@ expect "todo: motivo de specs con los números y factores" "$(js 'j.stages["spec
 contains "$(js 'j.stages["test-planner"].reason')" "REQ-X-NNN ACn" && pass "todo: motivo del plan de tests" || bad "todo: motivo del plan de tests"
 expect "todo: hechos contados" "$(js 'const f=j.facts;[f.req_f,f.req_nf,f.req_c,f.must,f.needs,f.needs_out,f.has_code,f.has_profile].join()')" "6,2,2,6,5,1,false,false"
 expect "todo: minutos ahorrados (29+17+24)" "$(js 'j.saved_minutes_estimate')" "70"
+expect "todo: proporción — sin TEST-MATRIX (6 REQ-F), PERF solo por REQ-NF-001 (200 ms), matriz generada" \
+  "$(js '["test-matrix","perf-scenarios","traceability-matrix"].map(k=>j.artifacts[k].make).join()')" "false,true,generated"
+expect "todo: un REQ-NF de rendimiento contado" "$(js 'j.facts.req_nf_perf')" "1"
 expect "todo: sin dudas ni escalados" "$(js 'j.doubts.length+","+j.escalations.length')" "0,0"
 expect "todo: factores con p y value" "$(js 'j.factors.sensitive_data.p+":"+j.factors.sensitive_data.value')" "0.05:no"
 expect "todo: fuente jev" "$(js 'j.source+":"+j.jev.model')" "jev:jev-mock"
@@ -219,6 +222,8 @@ expect "--full: todas las opcionales corren" "$(js 'Object.values(j.stages).ever
 expect "--full: motivo" "$(js 'j.stages["spec-auditor"].reason')" "set by user: full pipeline"
 expect "--full: 0 minutos ahorrados" "$(js 'j.saved_minutes_estimate')" "0"
 expect "--full: ninguna etapa queda skipped" "$(jf "$full/pipeline-state.json" 'Object.values(j.stages).filter(s=>s.status==="skipped").length')" "0"
+expect "--full: todos los documentos como siempre, salvo la matriz de trazabilidad, que se genera" \
+  "$(jf "$full/pipeline-state.json" '["test-matrix","perf-scenarios","traceability-matrix"].map(k=>j.route.artifacts[k].make).join()')" "true,true,generated"
 
 # ── reevaluación que sube el rigor: aparecen pagos ───────────────────────────
 esc=$(mkproj esc "$ROOT/examples/todo-app"); state_template "$esc"
