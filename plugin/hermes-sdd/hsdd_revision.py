@@ -165,6 +165,23 @@ def _fidelidad(repo: Path, n: str | None) -> list:
     for x in r.get("capturas", []):
         if x.get("grave"):
             av.append(_aviso("captura-no-ensena", f"La captura de {x['req']} AC{x['ac']} no enseña {', '.join('«' + s + '»' for s in x['no_se_ve'])}", True))
+    sin = [f"{x['req']} AC{x['ac']}" for x in r.get("capturas", []) if x.get("sin_comprobar")]
+    if sin:
+        av.append(_aviso("captura-sin-comprobar", f"{len(sin)} criterio(s) con captura y sin nada que comprobar en ella, porque el criterio no dice "
+                         f"qué se ve ({', '.join(sin[:8])}{'…' if len(sin) > 8 else ''}): falta su línea «Se ve:» (o «No visible:») en los requisitos"))
+    lint = r.get("lint_capturas", [])
+    for x in [x for x in lint if x.get("grave")][:10]:
+        av.append(_aviso("captura-mal-tomada", f"{x['fichero']}{':' + str(x['linea']) if x.get('linea') else ''}: {x['mensaje']}", True))
+    leves = [x for x in lint if not x.get("grave")]
+    if leves:
+        av.append(_aviso("capturas-avisos", f"{len(leves)} aviso(s) de sdd lint --captures, p. ej. {leves[0]['fichero']}: {leves[0]['mensaje']}"))
+    if r.get("mutantes_error"):
+        av.append(_aviso("mutantes-sin-hacer", f"No se pudieron probar los mutantes (si cambia un texto, ¿algún test lo nota?): {r['mutantes_error']}"))
+    fuera = [x for x in r.get("mutantes", []) if x.get("resultado") == "no está en el código"]
+    if fuera:
+        textos = list(dict.fromkeys(f"«{x['texto']}»" for x in fuera))
+        av.append(_aviso("texto-fuera-del-codigo", f"{len(fuera)} texto(s) que los criterios dicen que se ven no están tal cual en el código de la app "
+                         f"({', '.join(textos[:6])}{'…' if len(textos) > 6 else ''}): o la app los compone (y nadie comprueba la plantilla) o no los enseña"))
     for x in r.get("mutantes", []):
         if x.get("grave") and x.get("fallan"):
             av.append(_aviso("tests-rotos", f"{x['req']} AC{x['ac']}: sus tests ya fallan ({', '.join(Path(e).name for e in x['fallan'])})", True))
