@@ -356,6 +356,10 @@ def puede_jev(puerta: dict, cfg: dict | None = None) -> tuple[bool, str]:
     # Una pregunta que el método reserva a una persona (editar un test que ya existía, art. 12): la contesta una persona
     # aunque el modo sea auto (sala, mantenimiento: Jev autorizó editar un test e2e y el implementador, con razón, no lo
     # aplicó porque la opción decía «una persona autoriza»)
+    # Formato nuevo: una opción con «efecto: editar-test» (la puerta la enseña con ✏️ autoriza editar). El notario rechaza
+    # que Jev la elija; mejor no intentarlo y dejar la puerta a una persona desde el principio.
+    if puerta.get("preguntas") and "✏️ autoriza editar" in texto:
+        return False, "una opción autoriza editar tests que ya existían: la elige una persona"
     if puerta.get("preguntas") and re.search(r"art\.?\s*12\b|decisi[oó]n humana|una persona autoriza|human decision", texto, re.I):
         return False, "una pregunta la reserva el método a una persona (editar tests que ya existían)"
     if (puerta.get("encargado") or {}).get("graves"):   # revisión mecánica del encargado (hsdd_revision.py)

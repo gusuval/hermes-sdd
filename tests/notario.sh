@@ -279,6 +279,12 @@ Options:
      efecto: ninguno
 Answer:
 Q
+# 12c. rechazar una FASE sin tocar la pregunta NO autoriza editar el test de la opción recomendada (antes sí: un
+#      rechazo dejaba registrado un test-edit que la persona no había elegido)
+puerta g12c fase 9; decidir g12c rechazo telegram 111 "no me convence"; firmar g12c
+[ $rc -eq 0 ] && ! jq -se '[.[] | select(.type == "test-edit" and .gate == "g12c")] | length > 0' acceptance/decisions.jsonl >/dev/null 2>&1 \
+  && ok "un rechazo sin elegir la opción no autoriza editar tests" || bad "rechazo autorizó: $out $(grep g12c acceptance/decisions.jsonl | head -2)"
+git checkout -q -- .sdd/questions-x.md 2>/dev/null || true
 puerta g13 preguntas 9; decidir g13 respondo telegram 111; firmar g13
 [ $rc -eq 0 ] && jq -se '[.[] | select(.type == "test-edit")] | length == 1 and .[0].files == ["tests/a.test.js"] and .[0].question == "Q-x-030" and .[0].gate == "g13" and .[0].by == "Andrés León"' acceptance/decisions.jsonl >/dev/null \
   && jq -e '.autorizaciones == [{pregunta:"Q-x-030", ficheros:["tests/a.test.js"]}]' "$HERMES_SDD_HOME/actas/local/g13.json" >/dev/null \
@@ -342,11 +348,11 @@ out=$(PATH="$T/bin2:$PATH" bash "$ROOT/firmar.sh" "$R" g12 2>&1); rc=$?
 [ $rc -eq 0 ] && echo "$out" | grep -q "pide corregir el requisito" && grep -q "Cambio INT-" "$T/klog2" \
   && grep -rq "3 tareas, no 2" intent/ && ok "corrijo: se firma y lanza un cambio de requisitos con lo pedido" || bad "corrijo: $out $(cat "$T/klog2")"
 # 13. idempotencia por id de puerta: con la tarjeta vacía («/»), un registro anterior impedía registrar el rechazo
-puerta g13 fase 0; decidir g13 rechazo telegram 111 "falta el filtro por fecha"; firmar g13
-[ $rc -eq 0 ] && grep 'gate:g13"' acceptance/decisions.jsonl 2>/dev/null | grep -q '"result":"rejected"' \
+puerta g13r fase 0; decidir g13r rechazo telegram 111 "falta el filtro por fecha"; firmar g13r
+[ $rc -eq 0 ] && grep 'gate:g13r"' acceptance/decisions.jsonl 2>/dev/null | grep -q '"result":"rejected"' \
   && ok "el rechazo se registra aunque ya hubiera otros registros (clave: el id de la puerta)" || bad "idempotencia: $out $(tail -2 acceptance/decisions.jsonl)"
-n=$(grep -c 'gate:g13"' acceptance/decisions.jsonl); firmar g13
-[ "$(grep -c 'gate:g13"' acceptance/decisions.jsonl)" = "$n" ] && ok "repetir esa firma no lo duplica" || bad "duplica g13"
+n=$(grep -c 'gate:g13r"' acceptance/decisions.jsonl); firmar g13r
+[ "$(grep -c 'gate:g13r"' acceptance/decisions.jsonl)" = "$n" ] && ok "repetir esa firma no lo duplica" || bad "duplica g13r"
 # 14. tarjeta de la puerta ya archivada: lo firmado vale, no queda en «error» con el tag puesto
 puerta g14 plan; tablero g14 t_arch; decidir g14 conforme telegram 111; gemelo g14
 out=$(PATH="$T/bin2:$PATH" bash "$ROOT/firmar.sh" "$R" g14 2>&1); rc=$?

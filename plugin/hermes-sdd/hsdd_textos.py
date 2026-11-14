@@ -894,7 +894,11 @@ def aplicar_respuestas(puerta: dict, ficheros: list, texto: str, verbo: str, qui
             if acc:
                 out["por_aplicar"].append(acc)
             e = efecto(b, letra)
-            if e["efecto"] == "editar-test" and e["ficheros"]:
+            # Editar un test ya aceptado: o la persona eligió esa opción (Qn: L), o la aceptó por defecto al ACEPTAR viendo
+            # «esto lanzará: ✏️ autoriza editar…». Un rechazo o una petición de cambios sin tocar la pregunta no autoriza
+            # nada (notario 13: rechazar una FASE autorizaba la recomendada de una pregunta que seguía abierta).
+            explicita = r["como"] == "elegida por"
+            if e["efecto"] == "editar-test" and e["ficheros"] and (explicita or verbo in ("acepto", "observaciones", "respondo", "conforme")):
                 q = re.search(r"^Question:\s*(.*)$", b, re.M)
                 op = next((x for l, x, _ in opciones(b) if l == letra), "")
                 out["autorizaciones"].append({"pregunta": b.split()[1], "letra": letra, "ficheros": e["ficheros"],
