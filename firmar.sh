@@ -301,7 +301,9 @@ if ! hecho preguntas; then
   PIDEN=""; ACCIONES=""
   # (también al pedir cambios al plan o rechazar una FASE: lo pedido queda en feedback/ y se aplica tras el cambio, al
   # replanificar o al rehacer la FASE; antes esas respuestas se guardaban y el cambio no se lanzaba nunca)
-  case "$TIPO:$VERBO" in plan:conforme|plan:cambios|preguntas:respondo|fase:acepto|fase:observaciones|fase:rechazo|entrega:acepto|entrega:observaciones)
+  # (y al aprobar los requisitos: la puerta dice «esto lanzará: 📝 abre un cambio de requisitos: Q3, Q4»; antes se
+  # apuntaba y se seguía con la ruta, y lo elegido se perdía — taller, 14/11/2026: el taller compartido con servidor)
+  case "$TIPO:$VERBO" in requisitos:acepto|plan:conforme|plan:cambios|preguntas:respondo|fase:acepto|fase:observaciones|fase:rechazo|entrega:acepto|entrega:observaciones)
     PIDEN=".sdd/hermes/cambio-por-respuestas-$GATE.txt" ;; esac
   case "$TIPO:$VERBO" in fase:acepto|fase:observaciones|entrega:acepto|entrega:observaciones)
     ACCIONES=".sdd/hermes/respuestas-por-aplicar-$GATE.txt" ;; esac

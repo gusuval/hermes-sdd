@@ -205,7 +205,10 @@ case "$CMD" in
           fi
           RF=$(cambio_corto)
           N=$(primera_sin_aceptar)
-          if [ "$RF" = IGUAL ]; then
+          if ! ls "$REPO"/plan/fases/FASE-*.md >/dev/null 2>&1; then
+            # Aún no hay plan (un cambio pedido al aprobar los primeros requisitos): se sigue por la ruta, como siempre
+            tarjeta "Ruta" - 20m ruta
+          elif [ "$RF" = IGUAL ]; then
             # Mismos requisitos (el cambio solo tocó la especificación): sin replanificar, sigue la FASE en curso
             echo "Cambio sin cambios en los requisitos: se sigue con ${N:+la FASE-$N}${N:-el cierre}"
             if [ -n "$N" ]; then fase_n "$N" " (especificación corregida)"; else cierre; fi

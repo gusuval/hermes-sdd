@@ -387,4 +387,23 @@ out=$(bash "$ROOT/decidir.sh" g16 inventado 2>&1) && bad "verbo inventado" || { 
 out=$(HERMES_SDD_HOME="$HERMES_SDD_HOME" python3 "$ROOT/plugin/hermes-sdd/hsdd_nucleo.py" transicion g14 abierta 2>&1) && bad "firmada → abierta" \
   || { echo "$out" | grep -q "no puede pasar a «abierta»" && ok "tabla de transiciones: firmada no vuelve a abierta" || bad "transición: $out"; }
 [ "$(jq 'has("estado")' .sdd/hermes/puertas/g14.json)" = false ] || bad "la copia del repo lleva estado"
+# 17. aprobar los requisitos con una recomendada que pide cambiarlos (efecto: req-change) LANZA el cambio, como promete
+#     la puerta («esto lanzará: 📝 abre un cambio de requisitos»); antes se apuntaba y se seguía con la ruta (taller)
+cat > .sdd/questions-requirements-engineer.md <<'Q'
+## Q-requirements-engineer-001 [OPEN] skill=sdd-requirements-engineer
+Question: Shared state between visitors?
+Para el cliente: ¿Un único taller compartido por todas las personas?
+Options:
+  A) Shared workshop, needs a small server (recommended)
+     efecto: req-change
+  B) Each browser keeps its own data
+     efecto: ninguno
+Answer:
+Q
+sed -i.bak -E 's/^> \*\*Version:\*\*.*/> **Version:** 1.7/' requirements/REQUIREMENTS.md && rm -f requirements/REQUIREMENTS.md.bak
+git commit -qam "docs(requirements): v1.7" >/dev/null
+puerta g17 requisitos; tablero g17 t_17; : > "$T/klog2"; decidir g17 acepto telegram 111; gemelo g17
+out=$(PATH="$T/bin2:$PATH" bash "$ROOT/firmar.sh" "$R" g17 2>&1); rc=$?
+[ $rc -eq 0 ] && grep -q "Cambio INT-" "$T/klog2" && grep -rq "Shared workshop" intent/ \
+  && ok "aprobar requisitos con una respuesta req-change lanza el cambio de requisitos" || bad "requisitos + req-change: $out $(cat "$T/klog2")"
 exit $fail
