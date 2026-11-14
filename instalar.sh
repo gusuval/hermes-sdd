@@ -12,8 +12,8 @@
 #    plazos largos (una etapa dura 10-30 min). Se crean si no existen y NUNCA se borran: cada ajuste se escribe solo si
 #    cambia (cada «config set» hace que Hermes reescanee el perfil; borrar y recrear el perfil perdía al worker en
 #    marcha: «Kanban execution unknown», 11/11/2026 y otra vez en la prueba siguiente).
-# Del kanban global solo fija kanban.max_in_progress = 1 (una etapa a la vez en toda la máquina: en macOS Hermes no
-# pone tope) y comprueba que kanban.auto_decompose está desactivado.
+# Del kanban global solo fija kanban.max_in_progress = 1 si no tiene valor (una etapa a la vez en toda la máquina: en
+# macOS Hermes no pone tope; uno puesto a mano se respeta) y comprueba que kanban.auto_decompose está desactivado.
 #
 # Con trabajo en marcha no instala: tarjetas del arnés en running/ready/todo, una etapa o firma con el candado del repo
 # o una puerta «decidida» pendiente de firmar. --esperar espera a que no lo haya; --forzar instala igual (no lo uses
@@ -213,8 +213,16 @@ if ! jq -e --arg c "bash $HOME_SDD/actual/metodo/hooks/sdd-executor-deny.sh" 'an
 fi
 fi
 
-# Una etapa a la vez en toda la máquina: en macOS (y Windows) Hermes no pone tope a los workers del kanban
-poner - kanban.max_in_progress 1
+# Una etapa a la vez en toda la máquina: en macOS (y Windows) Hermes no pone tope a los workers del kanban. Es un tope
+# GLOBAL (frena también los tableros que no son del arnés): Hermes no tiene uno por tablero ni por perfil asignado a
+# toda la máquina (max_in_progress_per_profile cuenta solo dentro de cada tablero y vale para todos los perfiles). Solo
+# se pone si no hay ninguno: un valor que alguien puso a mano se respeta (README, «Tope de etapas a la vez»).
+MIP=$(hermes config get kanban.max_in_progress --json 2>/dev/null | tail -1 || true)
+case "$MIP" in
+  ""|null|'""') poner - kanban.max_in_progress 1 ;;
+  1) ;;
+  *) echo "  AVISO: kanban.max_in_progress = $MIP (puesto a mano): se respeta; con más de 1 pueden correr varias etapas a la vez" ;;
+esac
 
 # Menú de Telegram: Bot API admite como mucho 100 órdenes y Hermes muestra 60 por defecto; sin prioridad, las del
 # arnés (plugin) quedan ocultas tras las de Hermes y las skills. Se ponen delante, conservando la prioridad que ya hubiera.

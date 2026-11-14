@@ -72,6 +72,13 @@ jq '.perfiles["sdd-estacion"].curator.enabled = true' "$T/conf.json" > "$T/c" &&
 : > "$T/log"; bash "$ROOT/instalar.sh" >/dev/null 2>&1
 [ "$(grep -c "config set" "$T/log")" = 1 ] && grep -q "\-p sdd-estacion config set curator.enabled false" "$T/log" \
   && ok "un ajuste cambiado a mano: se corrige solo ese" || bad "un ajuste: $(grep 'config set' "$T/log")"
+# kanban.max_in_progress es global (frena tableros que no son del arnés): uno puesto a mano no se pisa
+jq '.global.kanban.max_in_progress = 3' "$T/conf.json" > "$T/c" && mv "$T/c" "$T/conf.json"
+: > "$T/log"; o=$(bash "$ROOT/instalar.sh" 2>&1)
+[ "$(jq -r '.global.kanban.max_in_progress' "$T/conf.json")" = 3 ] && ! grep -q "config set kanban.max_in_progress" "$T/log" \
+  && echo "$o" | grep -q "kanban.max_in_progress = 3 (puesto a mano)" \
+  && ok "kanban.max_in_progress puesto a mano: se respeta y se avisa" || bad "max_in_progress a mano: $(grep 'config set' "$T/log") $o"
+jq '.global.kanban.max_in_progress = 1' "$T/conf.json" > "$T/c" && mv "$T/c" "$T/conf.json"
 
 # 3. con trabajo en marcha no instala: una tarjeta de la estación en marcha, o una puerta decidida
 jq '.tareas.demo = [{"id":"t_1","title":"Implementar FASE-0","status":"running","assignee":"sdd-estacion"}]' "$T/kanban.json" > "$T/k" && mv "$T/k" "$T/kanban.json"

@@ -577,6 +577,7 @@ LENTA_MIN, LENTA_X = 30, 2      # en marcha más de 30 min y más del doble de s
 LATIDO_MIN = (2, 10, 60)        # el bucle del gateway escribe latido.json cada 5 s: callado más de esto se menciona
 APARCADA_GRACIA_S = 300         # una etapa aparcada por la cuota que sigue así 5 min después de su reinicio
 SIN_DESPACHAR_S = 600           # una tarjeta «ready» que el kanban no toma en 10 min (sin nada en marcha en ningún tablero)
+SIN_LATIDO_MIN = 30             # una etapa «running» sin ninguna señal de vida en el repo durante más de esto
 
 
 def _etapa_de(t: dict) -> tuple:
@@ -622,6 +623,7 @@ def vigia(repo: str, tablero: str | None = None, tarjetas: list | None = None, a
         if mins > LENTA_MIN and med and mins > LENTA_X * max(med, 1):
             out.append(f"LENTA | {t.get('title')} ({t['id']}) | más del doble de lo normal ({round(med)} min)")
     out += _vigia_kanban(tab, tarjetas or [], e, ahora)
+    out += sin_latido(repo, tarjetas or [], ahora)
     c = e.get("candado")
     if c and not c.get("vivo") and not any(t.get("status") == "running" for t in (tarjetas or [])):
         out.append(f"CANDADO HUÉRFANO | {c.get('run')} | la ejecución murió sin liberar el candado")
@@ -633,6 +635,41 @@ def vigia(repo: str, tablero: str | None = None, tarjetas: list | None = None, a
         n = len(sucio.splitlines())
         out.append(f"RESTOS SIN COMMIT | {n} fichero(s) | sin ninguna etapa en marcha")
     return out
+
+def latido_etapa(repo: str) -> float:
+    """Última señal de vida de una etapa en su repo (epoch, 0 si no hay): el run del ejecutor (.sdd/hermes/runs), el
+    candado del repo, el índice de git (cada add/commit lo toca) y el HEAD. El kanban no saca su latido en `list --json`."""
+    r = Path(repo)
+    marcas = [r / ".sdd" / "hermes" / "lock" / "run", r / ".git" / "index", r / ".git" / "logs" / "HEAD"]
+    runs = r / ".sdd" / "hermes" / "runs"
+    if runs.is_dir():
+        marcas += list(runs.iterdir())
+    ts = 0.0
+    for m in marcas:
+        try:
+            ts = max(ts, m.stat().st_mtime)
+        except OSError:
+            pass
+    return ts
+
+
+def sin_latido(repo: str, tarjetas: list, ahora: float | None = None) -> list:
+    """Etapas «running» de la estación sin señal de vida en el repo desde hace más de SIN_LATIDO_MIN (y en marcha desde
+    hace más que eso): colgadas o esperando algo que no llega. Una línea estable por tarjeta."""
+    import time as _t
+    ahora = ahora or _t.time()
+    corriendo = [t for t in tarjetas if t.get("status") == "running" and t.get("assignee", "sdd-estacion") == "sdd-estacion"]
+    if not corriendo:
+        return []
+    ultimo = latido_etapa(repo)
+    out = []
+    for t in corriendo:
+        desde = max(ultimo, float(t.get("started_at") or 0))
+        if desde and ahora - desde > SIN_LATIDO_MIN * 60:
+            out.append(f"SIN LATIDO | {t.get('title')} ({t['id']}) | en marcha y sin señales de vida en el repo desde hace "
+                       f"más de {SIN_LATIDO_MIN} min")
+    return out
+
 
 def _vigia_kanban(tab: str, tarjetas: list, e: dict, ahora: float) -> list:
     """Lo que se atasca fuera de las etapas: el gateway callado, etapas aparcadas que nadie reanuda y tarjetas listas

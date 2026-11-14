@@ -18,6 +18,8 @@ import logging
 import os
 import re
 import shutil
+import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -660,15 +662,16 @@ async def _vuelta_puerta(bot, idx: Path) -> None:
             actual.update(telegram=p["telegram"], publicada=p["publicada"], tg_vista=p["tg_vista"])
             _escribir(idx, actual)
     elif (p.get("estado") == "decidida" and time.time() >= p.get("firmar_en", 0)
-          and (p.get("decision") or {}).get("actor", {}).get("canal") != "local"):   # el local lo firma decidir.sh
+          and ((p.get("decision") or {}).get("actor", {}).get("canal") != "local"
+               or p.get("firma_gateway"))):   # el local lo firma decidir.sh, salvo con --en (ventana para deshacer)
         log.info("hermes-sdd: firmando la puerta %s", p["id"])
         await _firmar(bot, p)
     elif bot is not None:   # decidida o deshecha desde otro canal (dashboard): el mensaje de Telegram se pone al día
         await asyncio.wait_for(_sincronizar(bot, p), 60)
 
 
-async def _vuelta(ciclo: int) -> None:
-    app = _RT.get("app")
+async def _vuelta(ciclo: int, con_bot: bool = True) -> None:
+    app = _RT.get("app") if con_bot else None
     bot = app.bot if app is not None else None   # la app puede reconstruirse tras un fallo de conexión: siempre la actual
     for idx in sorted((HOME / "puertas").glob("*.json")):
         try:   # una puerta que falla (un repo borrado, un JSON roto, el kanban caído) no bloquea las demás
@@ -683,8 +686,10 @@ async def _vuelta(ciclo: int) -> None:
     if ciclo % 12 == 0:
         tareas.append(("limpiar", _limpiar_tableros, 300))
         tareas.append(("reintentos", lambda: _reintentar_perdidos(bot), 300))
+        # El vigía también sin Telegram: reanuda lo aparcado por la cuota y deja sus avisos para el panel
+        tareas.append(("vigía", lambda: _vigia(bot), 180))
         if bot is not None:
-            tareas += [("fallos", lambda: _avisar_fallos(bot), 180), ("vigía", lambda: _vigia(bot), 180)]
+            tareas.append(("fallos", lambda: _avisar_fallos(bot), 180))
     for nombre, tarea, plazo in tareas:   # cada una por separado: si una falla, las demás se hacen igual
         try:
             await asyncio.wait_for(tarea(), plazo)
@@ -694,32 +699,151 @@ async def _vuelta(ciclo: int) -> None:
             log.exception("hermes-sdd: error en %s (sigue)", nombre)
 
 
-async def _bucle() -> None:
+# Una sola vuelta a la vez en el proceso: el bucle sin Telegram (en su hilo) y el del gateway pueden convivir un tick
+# mientras el primero cede el sitio al segundo
+_VUELTA = threading.Lock()
+
+
+async def _bucle(parar: threading.Event | None = None) -> None:
+    """Cada 5 s una vuelta. `parar` (solo el bucle sin Telegram, en su hilo): al activarse, el bucle termina."""
     ciclo = 0
-    log.info("hermes-sdd: bucle en marcha")
+    log.info("hermes-sdd: bucle en marcha%s", "" if parar is None else " (sin Telegram)")
     while True:
         await asyncio.sleep(5)
+        if parar is not None and parar.is_set():
+            log.info("hermes-sdd: el bucle sin Telegram cede el sitio al del gateway")
+            return
+        if not _VUELTA.acquire(blocking=False):   # la otra vuelta aún no ha terminado: esta se salta
+            continue
         try:
-            await _vuelta(ciclo)
+            await _vuelta(ciclo, con_bot=parar is None)
         except asyncio.CancelledError:
             log.warning("hermes-sdd: bucle cancelado")
             raise
         except Exception:
             log.exception("hermes-sdd: error en una vuelta del bucle (sigue)")
+        finally:
+            _VUELTA.release()
         ciclo += 1
         try:   # latido: lo leen /estado y doctor para saber que el canal está vivo
-            _escribir(HOME / "latido.json", {"ts": _ahora(), "ciclo": ciclo, "pid": os.getpid()})
+            _escribir(HOME / "latido.json", {"ts": _ahora(), "ciclo": ciclo, "pid": os.getpid(),
+                                             "telegram": parar is None and _RT.get("app") is not None})
         except Exception:
             pass
 
 
-def _asegurar_bucle() -> None:
-    """Si el bucle murió (cancelado o por una excepción no prevista), lo vuelve a lanzar."""
+# ── un solo bucle por $HERMES_SDD_HOME ──────────────────────────────────────────────────────────────────────────
+# Hermes no tiene un gancho de arranque del gateway para plugins (los «gateway:startup» son hooks de shell del perfil,
+# y register_platform_handler solo se llama al conectar ESA plataforma). Por eso el bucle arranca desde register()
+# cuando el proceso es el gateway, y el adaptador de Telegram, si engancha luego, lo reutiliza. Un candado de proceso
+# (flock sobre $HERMES_SDD_HOME/bucle.lock, se suelta solo si el proceso muere) garantiza un único bucle aunque haya
+# varios gateways (perfiles) o el plugin se cargue dos veces.
+def _es_gateway() -> bool:
+    forzado = os.environ.get("HERMES_SDD_GATEWAY")   # pruebas: 1 / 0
+    if forzado is not None:
+        return forzado == "1"
+    a = sys.argv
+    if any(a[i] == "gateway" and a[i + 1] == "run" for i in range(len(a) - 1)):
+        return True
+    if getattr(getattr(sys.modules.get("__main__"), "__spec__", None), "name", "") == "gateway.run":   # python -m gateway.run
+        return True
+    try:   # `hermes gateway run` marca así su proceso (hermes_cli/gateway.py run_gateway → begin_process("gateway"))
+        from hermes_cli.observability import shared_metrics_process as smp
+        return smp._STATE.get("kind") == "gateway"
+    except Exception:
+        return False
+
+
+def _tomar_candado() -> bool:
+    """True si este proceso tiene (o acaba de tomar) el candado del bucle."""
+    if _RT.get("candado") is not None:
+        return True
+    import fcntl
+    HOME.mkdir(parents=True, exist_ok=True)
+    fd = os.open(HOME / "bucle.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    _RT["candado"] = fd
+    return True
+
+
+def _soltar_candado() -> None:
+    fd = _RT.pop("candado", None)
+    if fd is not None:
+        try:
+            os.close(fd)   # cerrar el descriptor suelta el flock
+        except OSError:
+            pass
+
+
+def _parar_bucle() -> None:
+    """Al descargar el plugin: para el bucle (en el loop del gateway o en su hilo) y suelta el candado."""
+    if _RT.get("hilo_parar") is not None:
+        _RT["hilo_parar"].set()
     t = _RT.get("bucle")
+    if t is not None and not t.done() and not t.get_loop().is_closed():
+        t.get_loop().call_soon_threadsafe(t.cancel)   # Hermes puede descargar el plugin desde otro hilo
+    _soltar_candado()
+
+
+def _bucle_en_hilo() -> None:
+    """El bucle en su propio hilo con su loop, sin Telegram, hasta que el adaptador de Telegram enganche y lo pase al
+    loop del gateway."""
+    if _RT.get("hilo") is not None and _RT["hilo"].is_alive():
+        return
+    parar = threading.Event()
+    _RT["hilo_parar"] = parar
+
+    def _correr():
+        try:
+            asyncio.run(_bucle(parar))
+        except Exception:
+            log.exception("hermes-sdd: el bucle sin Telegram se detuvo")
+    _RT["hilo"] = threading.Thread(target=_correr, name="hermes-sdd-bucle", daemon=True)
+    _RT["hilo"].start()
+
+
+def _arrancar_bucle() -> str:
+    """Desde register(): en el gateway, arranca el bucle aunque Telegram no esté configurado. Devuelve qué hizo."""
+    if not _es_gateway():
+        return "no es el gateway"
+    if not _tomar_candado():
+        log.info("hermes-sdd: ya hay un bucle con el candado %s (otro proceso o carga del plugin)", HOME / "bucle.lock")
+        return "ya hay un bucle"
+    # Siempre en su hilo: no se sabe si register() corre en el loop definitivo del gateway o en uno de arranque (el
+    # descubrimiento de plugins se dispara desde varios sitios); el hilo vive lo que el proceso. Telegram lo pasa luego
+    # a su loop (_asegurar_bucle)
+    if _RT.get("bucle") is not None and not _RT["bucle"].done():
+        return "ya en marcha"
+    _bucle_en_hilo()
+    return "hilo"
+
+
+def _asegurar_bucle() -> None:
+    """Si el bucle no corre en el loop actual (no arrancó, murió o va en su hilo sin Telegram), lo lanza aquí: una
+    sola tarea viva aunque el adaptador reconstruya la app. Con el candado en otro proceso no lanza nada."""
+    if not _tomar_candado():
+        log.warning("hermes-sdd: el bucle de las puertas ya lo tiene otro proceso o carga del plugin (%s); no se lanza otro",
+                    HOME / "bucle.lock")
+        return
+    hilo = _RT.get("hilo")
+    if hilo is not None and hilo.is_alive():   # el de sin Telegram cede: a partir de aquí, el del loop del gateway
+        _RT["hilo_parar"].set()
+    t = _RT.get("bucle")
+    loop = asyncio.get_running_loop()
+    if t is not None and not t.done() and t.get_loop() is not loop:   # quedó en otro loop (p. ej. uno de arranque ya cerrado)
+        if not t.get_loop().is_closed():
+            t.get_loop().call_soon_threadsafe(t.cancel)
+        t = None
     if t is None or t.done():
         if t is not None:
             log.warning("hermes-sdd: el bucle estaba parado; se relanza")
-        _RT["bucle"] = asyncio.get_running_loop().create_task(_bucle())
+        _RT["bucle"] = loop.create_task(_bucle())
 
 
 
@@ -839,10 +963,41 @@ async def _reanudar_aparcadas(boards) -> int:
     return n
 
 
+async def _vigia_etapas(bot) -> None:
+    """Etapas en marcha sin latido en su repo (hsdd_proyectos.sin_latido): las deja en alertas.json para el panel y
+    avisa por Telegram una vez por tarjeta (si sigue igual no se repite; si se recupera y vuelve a callar, sí)."""
+    alertas = {}
+    for b, repo in (await _proyectos()).items():
+        if (HOME / "pausa" / b).exists() or (HOME / "pausa" / "_todo").exists():
+            continue
+        lineas = PR.sin_latido(repo, await _tarjetas(b))
+        if lineas:
+            alertas[b] = lineas
+    _escribir(HOME / "alertas.json", {"ts": _ahora(), "proyectos": alertas})
+    avisadas = set(_leer(HOME / "alertas_avisadas.json", []) or [])
+    actuales = {f"{b}|{l}" for b, ls in alertas.items() for l in ls}
+    if bot is not None:
+        for clave in sorted(actuales - avisadas):
+            b, linea = clave.split("|", 1)
+            partes = [x.strip() for x in linea.split("|")]
+            for chat in _chats():
+                try:
+                    await bot.send_message(chat_id=int(chat), text=(
+                        f"🫥 «{b}»: la etapa «{partes[1] if len(partes) > 1 else ''}» lleva más de "
+                        f"{PR.SIN_LATIDO_MIN} min sin dar señales de vida.\n"
+                        "Puede estar colgada o esperando algo. Mírala con /estado " + b))
+                except Exception as e:
+                    log.warning("hermes-sdd: aviso de etapa sin latido: %s", e)
+        avisadas = actuales   # se olvida lo que ya se recuperó
+    else:
+        avisadas &= actuales   # sin Telegram no se avisa: se avisará cuando enganche
+    _escribir(HOME / "alertas_avisadas.json", sorted(avisadas))
+
+
 async def _vigia(bot) -> None:
     """Cada minuto: cuota que ya se reinició, mensaje vivo por proyecto y resúmenes programados."""
     cuota = _leer(HOME / "cuota.json")
-    if cuota and cuota.get("motivo") == "sesion" and not cuota.get("avisado"):   # un aviso, no uno por reintento
+    if bot is not None and cuota and cuota.get("motivo") == "sesion" and not cuota.get("avisado"):   # un aviso, no uno por reintento
         for chat in _chats():
             try:
                 await bot.send_message(chat_id=int(chat), text=(
@@ -859,7 +1014,11 @@ async def _vigia(bot) -> None:
         n = await _reanudar_aparcadas(libres)
         log.info("hermes-sdd: cuota reiniciada; %d etapa(s) reanudadas", n)
     cfg = _config()
-    if cfg.get("mensaje_vivo"):
+    try:
+        await _vigia_etapas(bot)
+    except Exception:
+        log.exception("hermes-sdd: vigía de etapas (sigue)")
+    if bot is not None and cfg.get("mensaje_vivo"):
         vivos = _leer(HOME / "vivos.json", {}) or {}
         for b, repo in (await _proyectos()).items():
             texto = "🛰 " + await _resumen_proyecto(b, repo)
@@ -881,7 +1040,7 @@ async def _vigia(bot) -> None:
     await _mantenimiento_diario()
     hoy = datetime.now().strftime("%Y-%m-%d")
     enviados = _leer(HOME / "resumenes.json", {}) or {}
-    for hora in cfg.get("resumenes", []):
+    for hora in (cfg.get("resumenes", []) if bot is not None else []):
         clave = f"{hoy} {hora}"
         if datetime.now().strftime("%H:%M") >= hora and clave not in enviados:
             texto = await _resumen_periodico()
@@ -979,7 +1138,7 @@ def register(ctx):
         application.add_handler(MessageHandler(filters.TEXT & _EsRespuestaDePuerta(), _on_respuesta))
         (HOME / "puertas").mkdir(parents=True, exist_ok=True)
 
-        _asegurar_bucle()   # una sola tarea viva aunque el adaptador reconstruya la app
+        _asegurar_bucle()   # reutiliza el bucle si ya corre aquí; si iba sin Telegram en su hilo, pasa a este loop
 
     def _cmd_puertas(raw_args: str = "") -> str:
         try:
@@ -1201,6 +1360,13 @@ def register(ctx):
                 "Te llegará la puerta de Requisitos cuando el ejecutor los tenga." + enc)
 
     ctx.register_telegram_handler(_wire)
+    # Bucle de las puertas también sin Telegram (firma de lo decidido en el panel, Jev, reintentos, cuota): ver _arrancar_bucle
+    if hasattr(ctx, "on_unload"):
+        ctx.on_unload(_parar_bucle)
+    try:
+        log.info("hermes-sdd: arranque del bucle: %s", _arrancar_bucle())
+    except Exception:
+        log.exception("hermes-sdd: no se pudo arrancar el bucle desde el registro (lo hará Telegram si engancha)")
     # args_hint siempre entre [ ]: Hermes deja fuera del menú de Telegram las órdenes cuya ayuda empieza por «<»
     # (argumento obligatorio). Sin argumentos, cada orden explica cómo se usa.
     ctx.register_command("nuevo", _cmd_nuevo, description="Crea y lanza un proyecto",

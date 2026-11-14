@@ -406,4 +406,22 @@ puerta g17 requisitos; tablero g17 t_17; : > "$T/klog2"; decidir g17 acepto tele
 out=$(PATH="$T/bin2:$PATH" bash "$ROOT/firmar.sh" "$R" g17 2>&1); rc=$?
 [ $rc -eq 0 ] && grep -q "Cambio INT-" "$T/klog2" && grep -rq "Shared workshop" intent/ \
   && ok "aprobar requisitos con una respuesta req-change lanza el cambio de requisitos" || bad "requisitos + req-change: $out $(cat "$T/klog2")"
+# 18. decidir.sh --en: el canal local con ventana para deshacer (la firma el gateway al vencer, como Telegram) y
+#     decidir.sh <puerta> deshacer mientras no esté firmada; sin --en, firma en el acto y no se deshace
+puerta g18 plan; f="$HERMES_SDD_HOME/puertas/g18.json"
+jq --arg r "$R" '.id = "g18" | .repo = $r | .estado = "abierta" | .titulo = "Plan" | .opciones = [{verbo:"conforme", etiqueta:"✅"}]' \
+  .sdd/hermes/puertas/g18.json > "$f"; head0=$(git rev-parse HEAD)
+out=$(bash "$ROOT/decidir.sh" --en dos g18 conforme 2>&1) && bad "--en sin segundos válidos" \
+  || { echo "$out" | grep -q "segundos entre" && [ "$(jq -r .estado "$f")" = abierta ] && ok "decidir.sh --en: segundos o «config»; si no, no decide" || bad "--en inválido: $out"; }
+out=$(bash "$ROOT/decidir.sh" --en 60 g18 conforme 2>&1); rc=$?
+[ $rc -eq 0 ] && jq -e --argjson t "$(date +%s)" '.estado == "decidida" and .firma_gateway == true and .firmar_en > $t + 50 and .decision.actor.canal == "local"' "$f" >/dev/null \
+  && [ -f .sdd/hermes/decisiones/g18.json ] && [ "$(git rev-parse HEAD)" = "$head0" ] && echo "$out" | grep -q "g18 deshacer" \
+  && ok "decidir.sh --en 60: queda decidida con su hora de firma, para el gateway, sin firmar aún" || bad "--en: $rc $out $(cat "$f")"
+out=$(bash "$ROOT/decidir.sh" g18 deshacer 2>&1); rc=$?
+[ $rc -eq 0 ] && jq -e '.estado == "abierta" and ((has("decision") or has("firmar_en") or has("firma_gateway")) | not)' "$f" >/dev/null \
+  && [ ! -f .sdd/hermes/decisiones/g18.json ] && ok "decidir.sh <puerta> deshacer: vuelve a abierta (decidida → abierta) y borra la decisión" || bad "deshacer: $out $(cat "$f")"
+out=$(bash "$ROOT/decidir.sh" g18 deshacer 2>&1) && bad "deshace una puerta abierta" || { echo "$out" | grep -q "Ya no se puede deshacer" && ok "no deshace lo que no está decidido" || bad "deshacer abierta: $out"; }
+HERMES_SDD_DESHACER_S=45 bash "$ROOT/decidir.sh" --en config g18 conforme >/dev/null 2>&1
+jq -e --argjson t "$(date +%s)" '.firmar_en > $t + 30 and .firmar_en < $t + 60' "$f" >/dev/null && ok "--en config: la ventana de nuevo.sh config --deshacer" || bad "--en config: $(jq .firmar_en "$f")"
+out=$(bash "$ROOT/decidir.sh" g14 deshacer 2>&1) && bad "deshace una firmada" || ok "una puerta firmada no se deshace"
 exit $fail

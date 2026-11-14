@@ -36,8 +36,8 @@ decisión «humana»: el guardia de escrituras permite todo `.sdd/*` y todo lo q
 
 Cierre propuesto, por capas:
 - **Guardias**: denegar escrituras de las etapas en `.sdd/hermes/{decisiones,puertas}` y en `~/.hermes/**`.
-- **Notario**: el gateway no firma decisiones del canal `local` (esas solo las firma `decidir.sh` en el momento, en
-  primer plano); y cada decisión registrada por un canal lleva una prueba que solo el canal puede producir (el
+- **Notario**: el gateway no firma decisiones del canal `local` (esas las firma `decidir.sh` en el momento, en
+  primer plano, salvo las de `decidir.sh --en`, con ventana para deshacer); y cada decisión registrada por un canal lleva una prueba que solo el canal puede producir (el
   gateway ya tiene el `callback_id` de Telegram; para el panel, la sesión).
 - **A medio plazo**: separar usuarios del sistema (o contenedor) para estación, ejecutor y encargado, con el estado
   de Hermes sin permiso de escritura para ellos.

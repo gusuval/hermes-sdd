@@ -149,6 +149,8 @@ function crearSDD(E) {
     const vivo = datos.canal_vivo ? `latido del gateway ${datos.canal_vivo}` : '⚠️ sin latido del gateway: nadie firmará hasta que arranque'
     return h('div', { style: S.pagina },
       h('div', { style: S.meta }, `Decides como ${datos.persona} (${datos.identidad}) · ${vivo}`),
+      (datos.alertas || []).length ? h(Tarjeta, { titulo: '🫥 Etapas sin señales de vida' },
+        datos.alertas.map(a => h('div', { key: a, style: S.meta }, a))) : null,
       datos.puertas.length
         ? datos.puertas.map(p => h(Puerta, { key: p.id, p, recargar }))
         : h(Tarjeta, null, h('div', { style: S.texto }, 'No hay puertas abiertas. Cuando una etapa necesite tu decisión aparecerá aquí y en Telegram.')),

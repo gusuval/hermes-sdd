@@ -251,7 +251,11 @@ ofrece en vez de dejar solo `❌ Rechazar`. Jev nunca puede pulsarlo.
 Un mensaje por proyecto se actualiza en silencio con el progreso. Hay resúmenes a las 08:30 y a las 19:00, y silencio
 de 22:00 a 8:00 (configurable en `~/.hermes/hermes-sdd/atencion.json`).
 
-**Sin Telegram** (plan B): `bash decidir.sh <puerta> acepto`. Queda registrado que la decisión fue local.
+**Sin Telegram** (plan B): `bash decidir.sh <puerta> acepto`. Queda registrado que la decisión fue local y se firma en
+el acto. Con ventana para deshacer, como en Telegram: `bash decidir.sh --en 180 <puerta> acepto` (o `--en config`, la
+ventana de `nuevo.sh config --deshacer`); la firma el gateway al vencer y, mientras tanto, `bash decidir.sh <puerta>
+deshacer` la vuelve a abrir. El gateway hace su trabajo (firmar lo decidido en el panel o con `--en`, Jev, reintentos,
+reanudar tras la cuota, el vigía) aunque Telegram no esté configurado.
 
 Más detalle sobre cada canal y cómo añadir otros (Slack, email): [docs/canales.md](docs/canales.md).
 
@@ -351,6 +355,7 @@ en un contenedor o una firma con llave física lo *impiden*.
 | La pestaña no sale en Hermes Desktop | **Capabilities → Plugins → Rescan** y activa «SDD» (viene apagada). |
 | `AVISO: kanban.auto_decompose está activo` | `hermes config set kanban.auto_decompose false` |
 | Las etapas tardan en arrancar (hasta un minuto entre tarjeta y tarjeta) | `hermes config set kanban.dispatch_interval_seconds 10` y `hermes gateway restart` (el instalador lo avisa) |
+| Quieres varias etapas (o tareas de otros tableros) a la vez | El instalador pone `kanban.max_in_progress = 1` si no tiene valor: es un tope **global** de Hermes (también frena tableros que no son del arnés; Hermes no tiene uno por tablero ni por perfil para toda la máquina). Para subirlo: `hermes config set kanban.max_in_progress 4` y `hermes gateway restart`; el instalador respeta un valor puesto a mano. `hermes config unset kanban.max_in_progress` lo quita (Hermes vuelve a su tope por memoria, ninguno en macOS), pero el siguiente `instalar.sh` lo volvería a poner a 1: para no tener tope de verdad, pon un número alto. Con más de 1, las etapas de proyectos distintos corren a la vez (en un mismo proyecto nunca: candado del repo). |
 | Una etapa sale «busy» | Ya hay otra etapa en marcha en ese repo: el arnés nunca ejecuta dos a la vez en el mismo proyecto. Espera a que termine. |
 | Una puerta queda en «error» (el notario no pudo firmar) | `bash ~/.hermes/hermes-sdd/actual/puerta.sh recuperar <id>`: si ya estaba validada, la firma sigue donde se quedó; si no, se deshace lo que dejó a medias y la puerta vuelve a abrirse. |
 | El kanban perdió una etapa («Kanban execution unknown», «managed worker lost») | El gateway la repite solo (dos veces como mucho con el mismo commit) y te avisa. |
