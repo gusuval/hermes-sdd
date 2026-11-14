@@ -99,7 +99,9 @@ async def puertas(request: Request):
     abiertas = N.puertas(("abierta", "decidida"))
     recientes = sorted(N.puertas(("firmada", "error")), key=lambda p: p.get("creada", ""))[-8:]
     lat = N.leer(N.HOME / "latido.json", {}) or {}
+    alertas = (N.leer(N.HOME / "alertas.json", {}) or {}).get("proyectos") or {}   # el vigía del gateway: etapas sin latido
     return {"persona": persona, "identidad": ident, "ahora": time.time(),
+            "alertas": [f"{b}: {l}" for b, ls in sorted(alertas.items()) for l in ls],
             "canal_vivo": lat.get("ts"), "puertas": [_vista(p, persona) for p in abiertas],
             "recientes": [{"id": p["id"], "titulo": p.get("titulo"), "tablero": p.get("tablero"), "estado": p.get("estado"),
                            "resultado": p.get("resultado") or p.get("error", "")} for p in reversed(recientes)]}
