@@ -90,7 +90,7 @@
 //       `literal_gaps` of `sdd lint --quotes` (Q-02/Q-03 not excepted); under enforce a passing criterion of a Must with
 //       one is `weakened` and the requirement MISSING ("test does not carry the criterion's literal"); warn only lists
 //       them. summary.literal_gaps counts the criteria, summary.weakened the held-back ones.
-//   sdd accept record <waiver|demo|measurement|inspection|fase-acceptance|challenge-dismissal|literal-exception|floor-exception> --by NAME --role ROLE [fields]
+//   sdd accept record <waiver|demo|measurement|inspection|fase-acceptance|challenge-dismissal|literal-exception|floor-exception|test-edit> --by NAME --role ROLE [fields]
 //              [--attach FILE...] [--allow-dirty]
 //       Append one validated decision to acceptance/decisions.jsonl (head and reqHash are filled in). Fields:
 //       waiver --req ID --reason TEXT [--follow-up #N (required for a Must)] · demo --req ID [--ac N] --observed TEXT
@@ -104,8 +104,11 @@
 //       accepts one finding of `sdd lint --floor`: code F-01, F-02, F-04 or F-07, the file and the line text as the JSON
 //       prints them in `text` — whitespace at both ends ignored — against that base; the record keeps code, file, text
 //       and base as a full sha; a changed line or another base brings the finding back).
+//       · test-edit --paths FILE... --question Q-… --reason TEXT [--gate ID] (no --req; a person authorizes editing tests
+//       that already existed, Art. 12: exactly those files, from this HEAD until the next acceptance. Written by the
+//       harness notary from an answered question whose option declares `efecto: editar-test FILE...`)
 //       --attach stores files under evidence_dir with their sha256 (not on a waiver, a dismissal or an exception). Every
-//       type but waiver, challenge-dismissal, literal-exception and floor-exception exits 2 on uncommitted changes under
+//       type but waiver, challenge-dismissal, literal-exception, floor-exception and test-edit exits 2 on uncommitted changes under
 //       its --paths (default the code paths, untracked files included): commit first, or --allow-dirty to store the
 //       record with dirty: true.
 //   sdd accept measure --req ID [--ac N] --metric NAME --command CMD --extract REGEX --op lt|le|gt|ge|eq

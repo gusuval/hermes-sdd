@@ -140,7 +140,7 @@ puerta() { bash "$ROOT/puerta.sh" "$REPO" "$@"; }
 fidelidad() {  # ronda adversarial del método + hsdd_fidelidad de la FASE (deja .sdd/hermes/fidelidad-<N>.json)
   claude_etapa acceptance "/sdd-acceptance --adversarial --fase $FASE — $ARNES Independent verifiers read each criterion of FASE-$FASE against production code, tests and captures: the GIVEN situation with its own data and actor, the WHEN, the whole THEN with its exact text, and whether each capture shows it. Record confirmed or inconclusive findings with accept challenge add. Do not fix anything and do not sign off. Run the verifier and counter-verification agents in the foreground and wait for their answers in this same session: never schedule reminders, wake-ups, monitors or background waits (nobody will come back to this session), and close the acceptance stage state before you finish."
   # Rápida (sin mutantes): decide si hace falta la pasada de arreglo. Los mutantes, una sola vez, antes de la puerta
-  python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" --fase "$FASE" --sin-mutantes >/dev/null 2>&1 || true
+  python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" --fase "$FASE" --sin-mutantes >/dev/null 2>&1 || jq -n '{graves: 1, error: "hsdd_fidelidad falló: no hay comprobación de fidelidad"}' > ".sdd/hermes/fidelidad-$FASE.json"   # un fallo no deja valer el JSON anterior
 }
 hay_hallazgos() {  # impugnaciones abiertas sobre un Must o hallazgos graves de fidelidad
   [ "$(node "$SDD" accept challenge list --open --fase "$FASE" --json 2>/dev/null | jq -r '.must_open // ([.challenges[]? | select(.state == "open")] | length)')" != 0 ] && return 0
@@ -419,7 +419,7 @@ PY
     # Antes de entregar, la comprobación rápida de fidelidad (sin LLM ni mutantes): capturas que no enseñan su criterio,
     # tests ya aceptados tocados sin autorizar, ejemplos incoherentes. Lo grave se arregla aquí, una vez, y no en una
     # vuelta de rechazo (club: de 9 implementaciones, 5 fueron repeticiones por esto; cada vuelta, 30-50 min)
-    python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" --fase "$FASE" --sin-mutantes >/dev/null 2>&1 || true
+    python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" --fase "$FASE" --sin-mutantes >/dev/null 2>&1 || jq -n '{graves: 1, error: "hsdd_fidelidad falló: no hay comprobación de fidelidad"}' > ".sdd/hermes/fidelidad-$FASE.json"   # un fallo no deja valer el JSON anterior
     if [ "$(jq -r '.graves // 0' ".sdd/hermes/fidelidad-$FASE.json" 2>/dev/null || echo 0)" -gt 0 ]; then
       claude_etapa task-implementer "/sdd-task-implementer --fase=$FASE — $ARNES Before handing FASE-$FASE over, a quick check found these problems. Fix each one (a task and a commit each): $(hallazgos | grep -v '^- CH-' | tr '\n' ' ')"
     fi
@@ -443,7 +443,7 @@ PY
       fidelidad
     fi
     # Mutantes de los Must de la FASE (una vez, sobre lo que verá la persona): lo que encuentren llega a la puerta
-    python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" --fase "$FASE" >/dev/null 2>&1 || true
+    python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" --fase "$FASE" >/dev/null 2>&1 || jq -n '{graves: 1, error: "hsdd_fidelidad falló: no hay comprobación de fidelidad"}' > ".sdd/hermes/fidelidad-$FASE.json"   # un fallo no deja valer el JSON anterior
     P=$(puerta fase "$FASE") || falla "no se pudo abrir la puerta de la FASE-$FASE"
     fin "$RES" "Veredictos y demo de la FASE-$FASE listos" "$P" ;;
 
@@ -473,7 +473,7 @@ PY
       claude_etapa acceptance "/sdd-acceptance — $ARNES Compute the GLOBAL per-requirement verdicts (all FASEs) with evidence. Do not sign off."
     fi
     # Fidelidad global antes de entregar: tests congelados, capturas, mutantes de todos los Must y coherencia
-    python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" >/dev/null 2>&1 || true
+    python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" >/dev/null 2>&1 || jq -n '{graves: 1, error: "hsdd_fidelidad falló: no hay comprobación de fidelidad"}' > .sdd/hermes/fidelidad-global.json
     P=$(puerta entrega) || falla "no se pudo abrir la puerta de entrega"
     [ -n "${RES:-}" ] || RES='{"outcome":"done","reason":"ok"}'
     fin "$RES" "Cierre: puerta de calidad global calculada" "$P" ;;

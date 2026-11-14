@@ -6,8 +6,9 @@
         "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/sdd-session-start.sh\"", "timeout": 10 } ] }
     ],
     "PreToolUse": [
-      { "matcher": "Edit|Write",
-        "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/sdd-upstream-guard.sh\"", "timeout": 5 } ] },
+      { "matcher": "Edit|Write|MultiEdit",
+        "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/sdd-upstream-guard.sh\"", "timeout": 5 },
+                   { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/sdd-executor-deny.sh\"", "timeout": 5 } ] },
       { "matcher": "Bash",
         "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/sdd-executor-deny.sh\"", "timeout": 5 },
                    { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/sdd-tool-guard.sh\"", "timeout": 5 } ] },

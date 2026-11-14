@@ -60,7 +60,7 @@ import { lintQuotes, literalGate, literalGapsByCriterion, isCriterionLiteral } f
 export const SCHEMA = "sdd-acceptance-v1";
 export const VERDICTS = ["VERIFIED", "FAILING", "MISSING", "WAIVED", "DEPRECATED"];
 export const RECORD_TYPES = ["waiver", "demo", "measurement", "inspection", "fase-acceptance", "challenge-dismissal", "literal-exception",
-  "floor-exception"];
+  "floor-exception", "test-edit"];
 /** Finding codes of `sdd lint --floor` (scripts/lib/floor.mjs) that a person may except with a floor-exception record. */
 export const FLOOR_CODES = ["F-01", "F-02", "F-04", "F-07"];
 export const OPS = { lt: (a, b) => a < b, le: (a, b) => a <= b, gt: (a, b) => a > b, ge: (a, b) => a >= b, eq: (a, b) => a === b };
@@ -217,6 +217,15 @@ export function validateRecord(rec, reqs, ctx = {}) {
     if (!rec.challenge) { e.push("--challenge CH-NNN is required"); return e; }
     if (!(ctx.challenges || []).some((c) => c.id === rec.challenge)) e.push(`${rec.challenge} is not in ${CHALLENGES_FILE}`);
     else if ((ctx.records || []).some((r) => r.type === "challenge-dismissal" && r.challenge === rec.challenge)) e.push(`${rec.challenge} is already dismissed`);
+    return e;
+  }
+  if (rec.type === "test-edit") {
+    // A person authorizes editing tests that already existed (Art. 12) by answering a question whose chosen option
+    // declares `efecto: editar-test <files>`: exactly those files, from this HEAD on, until the next acceptance.
+    if (!Array.isArray(rec.files) || !rec.files.length) e.push("--paths is required (the test files the person authorizes editing)");
+    else if (rec.files.some((f) => !f || path.isAbsolute(f) || f.split("/").includes(".."))) e.push("--paths must be relative paths inside the repository");
+    if (!rec.question) e.push("--question Q-… is required (the answered question that authorizes it)");
+    if (!rec.reason) e.push("--reason is required (the question and the chosen option, as the person saw them)");
     return e;
   }
   if (rec.type === "floor-exception") {
