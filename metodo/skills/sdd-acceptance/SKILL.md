@@ -278,7 +278,9 @@ it holds the verifier prompt, the categories and the commands.
 1. `--check` for the scope first: the round reads HEAD, and the ledger must describe it.
 2. `node "$SDD" accept adversarial plan [--fase N] --json`: the mechanical coverage critic (requirements in no FASE,
    FASEs without header, criteria without test) and each FASE's requirements, criteria, bound tests and candidate
-   files.
+   files. A later round of the same FASE (after the fix pass, or a re-acceptance) may be incremental: `--since` the
+   previous round's plan marks `recheck` per criterion, and only those go to the verifiers
+   (`references/adversarial-protocol.md` § Incremental round). The first round of each FASE is always complete.
 3. Priority: Jev's `test-adequacy` over every bound criterion (or your own reading with Jev off) orders what the
    verifiers read first and picks the clean verdicts to re-check. It never marks anything clean.
 4. One verifier per FASE (Agent, fresh context, read-only), at most `test_slots` at a time and tests one file at a

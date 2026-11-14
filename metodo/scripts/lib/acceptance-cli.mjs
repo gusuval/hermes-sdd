@@ -11,7 +11,7 @@ import {
   SCHEMA, RECORD_TYPES, DECISIONS_FILE, ROUTES, evaluate, gitContext, loadScenarios, readDecisions,
   validateRecord, reqHash, faseScope, renderReport, renderPrBlock, routeHint, criterionHint, unchangedSince, acNumber,
   compareMeasurement, dirtyUnder, evidenceSettings, describeFile, CHALLENGES_FILE, CHALLENGE_CATEGORIES, readChallenges,
-  validateChallenge, challengeStates, nextChallengeId, adversarialGate, effectivePriority,
+  validateChallenge, challengeStates, nextChallengeId, adversarialGate, effectivePriority, testKeys,
 } from "./acceptance.mjs";
 import { parseRequirements, parseNeeds, checkNeedCoverage } from "../sdd-jev.mjs";
 import { lintQuotes, testPathsOf } from "./quotes.mjs";
@@ -27,7 +27,8 @@ const die = (msg) => { console.error(`${PROG}: ${msg}`); throw new Exit(2); };
 const VALUED = new Set(["repo", "junit", "junit-sha", "fase", "out", "report", "mode", "ledger", "state", "max-cycles",
   "req", "ac", "by", "role", "reason", "follow-up", "observed", "pass", "metric", "op", "threshold", "paths", "note",
   "result", "channel", "demo", "requirements", "decisions", "command", "extract", "attach",
-  "category", "quote", "evidence", "verifier", "counter", "challenge", "challenges", "literal", "code", "file", "line", "base", "question", "gate"]);
+  "category", "quote", "evidence", "verifier", "counter", "challenge", "challenges", "literal", "code", "file", "line", "base", "question", "gate",
+  "since"]);
 const MULTI = new Set(["junit", "paths", "attach", "evidence"]);
 const FLAGS = new Set(["json", "md", "needs", "quotes", "captures", "reset", "no-out", "help", "remeasure", "allow-dirty", "open"]);
 
@@ -576,6 +577,153 @@ function listFases(root) {
 }
 const looksLikeFile = (s) => /[\\/]/.test(String(s || "")) || /\.[a-z]{1,5}$/i.test(String(s || ""));
 
+// ------------------------------------------------------------------ adversarial plan --since (incremental round)
+// A later round (after the fix pass, or a re-acceptance after a rejection) only needs to re-read the criteria whose
+// evidence moved since the previous round: `--since` takes that round's plan JSON (or a commit) and marks each
+// criterion `recheck: true|false` with its `recheck_reasons`. The rule is conservative: whatever cannot be pinned to
+// a criterion (a helper, a config, code no commit attributes to the FASE) re-checks every criterion of the FASE.
+// Folders that are not evidence of the product (the method's documents, acceptance/, .sdd/) and *.md never count;
+// requirements/ counts through each requirement's text hash, and captures through their sha256.
+const NOT_EVIDENCE = /^(acceptance|status|task|plan|feedback|spec|changes|intent|audits|design|ux|requirements|docs|\.sdd|\.claude|\.github)\//;
+const TEST_TITLE = /^\s*(?:test|it)(?:\.(?:only|skip|fixme|fail|slow))?\s*\(\s*(['"`])((?:\\.|(?!\1).)*)\1/;
+const SHARED_START = /^\s*(?:test\.)?(?:describe(?:\.\w+)*|beforeAll|beforeEach|afterAll|afterEach)\s*\(/;
+/** Line regions of a test file: [{ from, to, title }] — each test runs to the next test, hook or describe; hooks,
+ *  describe headers and everything before the first test are shared (title null). null when no test is recognised. */
+function testRegions(code) {
+  const lines = code.split("\n");
+  const marks = [];
+  lines.forEach((l, i) => {
+    const t = l.match(TEST_TITLE);
+    if (t) marks.push({ line: i + 1, title: t[2] });
+    else if (SHARED_START.test(l)) marks.push({ line: i + 1, title: null });
+  });
+  if (!marks.some((m) => m.title !== null)) return null;
+  return [{ from: 1, to: marks[0].line - 1, title: null },
+    ...marks.map((m, k) => ({ from: m.line, to: (k + 1 < marks.length ? marks[k + 1].line : lines.length + 1) - 1, title: m.title }))];
+}
+/** New-side line ranges changed in `file` since `sha` (worktree included); null when git cannot tell. */
+function changedRanges(root, sha, file) {
+  const r = git(root, ["diff", "-U0", "--no-color", "--no-ext-diff", sha, "--", file]);
+  if (r.status !== 0) return null;
+  return [...r.stdout.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)].map((m) => {
+    const c = Number(m[1]), d = m[2] === undefined ? 1 : Number(m[2]);
+    return d === 0 ? [c, c + 1] : [c, c + d - 1]; // a pure deletion touches the lines on both sides
+  });
+}
+function readBaseline(root, since) {
+  const f = path.resolve(root, since);
+  if (existsSync(f) && statSync(f).isFile()) {
+    let p;
+    try { p = JSON.parse(readFileSync(f, "utf8")); } catch { die(`--since ${since}: not JSON`); }
+    if (p.$schema !== "sdd-adversarial-plan-v1" || !p.evaluated_sha) die(`--since ${since}: not an adversarial plan with evaluated_sha`);
+    return { sha: resolveSha(root, p.evaluated_sha), plan: p, file: path.relative(root, f) };
+  }
+  return { sha: resolveSha(root, since), plan: null, file: null };
+}
+
+function markRecheck(root, o, shownFases, { commits, codePaths, byId }) {
+  if (!isRepo(root)) die("accept adversarial plan --since needs a git repository");
+  const base = readBaseline(root, o.since);
+  const testPaths = listOf(stackProfile(root).test_paths, ["tests"]);
+  const under = (p, dirs) => dirs.some((d) => p === d || p.startsWith(d + "/"));
+  const { dir: evDir } = evidenceSettings(root);
+  // What changed since the baseline: tracked files (committed or not) and untracked ones
+  const changed = new Map();
+  for (const l of git(root, ["diff", "--name-status", "--no-renames", base.sha]).stdout.split("\n")) {
+    const m = l.match(/^([A-Z])\d*\t(.+)$/);
+    if (m) changed.set(m[2], m[1]);
+  }
+  for (const p of git(root, ["ls-files", "--others", "--exclude-standard"]).stdout.split("\n").filter(Boolean)) changed.set(p, "A");
+  const relevant = [...changed.keys()].filter((p) => !NOT_EVIDENCE.test(p) && !/\.md$/i.test(p) && !under(p, [evDir])).sort();
+  const codeChanged = relevant.filter((p) => under(p, codePaths));
+  // Test files (they hold recognisable tests) with the regions their changes hit; the rest is support (helpers,
+  // fixtures, configs, package.json)
+  const read = (p) => { try { return readFileSync(path.join(root, p), "utf8"); } catch { return null; } };
+  const testChanges = [], support = [];
+  for (const p of relevant.filter((x) => !under(x, codePaths))) {
+    const text = changed.get(p) === "D" ? git(root, ["show", `${base.sha}:${p}`]).stdout : read(p);
+    const regions = text !== null && under(p, testPaths) ? testRegions(text) : null;
+    if (!regions) { support.push(p); continue; }
+    const whole = changed.get(p) !== "M";
+    const ranges = whole ? null : changedRanges(root, base.sha, p);
+    const hit = whole || !ranges ? regions : regions.filter((g) => ranges.some(([a, b]) => a <= g.to && b >= g.from));
+    testChanges.push({ path: p, shared: hit.some((g) => g.title === null), titles: hit.filter((g) => g.title !== null).map((g) => g.title) });
+  }
+  // Commits since the baseline: which requirements they name (Refs) per code file
+  const sinceShas = new Set(git(root, ["rev-list", `${base.sha}..HEAD`]).stdout.split("\n").filter(Boolean));
+  const refsOf = new Map();
+  for (const c of commits.filter((x) => sinceShas.has(x.sha))) for (const f of c.files) {
+    if (!refsOf.has(f)) refsOf.set(f, new Set());
+    for (const id of c.ids) refsOf.get(f).add(id);
+  }
+  // Requirement texts at the baseline, when it is a commit and not a plan
+  let oldHash = null;
+  if (!base.plan) {
+    const rf = o.requirements || "requirements/REQUIREMENTS.md";
+    const t = git(root, ["show", `${base.sha}:${rf}`]);
+    oldHash = new Map(t.status === 0 ? parseRequirements(t.stdout).map((r) => [r.id, reqHash(r)]) : []);
+  }
+  const prevReq = new Map((base.plan?.fases || []).flatMap((f) => f.requirements || []).map((r) => [r.id, r]));
+  const cites = (title, reqId, c) => {
+    const k = testKeys(title);
+    return k.reqAcs.some((x) => x.req === reqId && x.ac === c.n) || k.scenarios.some((s) => (c.scenarios || []).includes(s))
+      || (c.tests || []).some((t) => t.name && (t.name === title || t.name.endsWith(` ${title}`)));
+  };
+  const baseName = (p) => path.basename(p).replace(/\.[^.]+$/, "");
+  let total = 0, recheck = 0;
+  for (const f of shownFases) {
+    // code files: the FASE's requirements they belong to (older commits of the FASE, or the commits since)
+    const codeOwners = codeChanged.map((p) => ({ path: p, reqs: f.requirements.filter((r) => r.candidate_files.includes(p) || refsOf.get(p)?.has(r.id)).map((r) => r.id) }));
+    const unowned = codeOwners.filter((x) => !x.reqs.length).map((x) => x.path);
+    const boundFiles = new Set(f.requirements.flatMap((r) => r.criteria.flatMap((c) => c.tests.map((t) => t.file).filter(Boolean))));
+    const boundText = new Map([...boundFiles].map((p) => [p, read(p) || ""]));
+    const supportUsed = support.map((p) => ({ path: p, by: [...boundFiles].filter((b) => boundText.get(b).includes(baseName(p))) }));
+    const supportAll = supportUsed.filter((s) => !s.by.length).map((s) => s.path);
+    let fTotal = 0, fRecheck = 0;
+    for (const r of f.requirements) {
+      const prev = prevReq.get(r.id);
+      const ledgerReq = byId.get(r.id);
+      for (const c of r.criteria) {
+        const why = [];
+        const prevC = prev?.criteria?.find((x) => x.n === c.n);
+        if (base.plan ? !prevC : !oldHash.has(r.id)) why.push("new");
+        else if (base.plan ? prev.reqHash !== r.reqHash : oldHash.get(r.id) !== r.reqHash) why.push("requirement text changed");
+        if (prevC && prev.verdict !== r.verdict) why.push(`verdict ${prev.verdict} → ${r.verdict}`);
+        // open now, or open at the baseline and gone stale since (what the fix pass answered): an older stale one
+        // was already looked at by the round after it
+        // (recorded at the baseline's HEAD or later, or listed open in the baseline plan)
+        const openAtBase = (x) => x.head === base.sha || sinceShas.has(x.head) || (prev?.challenges_open || []).includes(x.id);
+        const ch = (ledgerReq?.challenges || []).filter((x) => Number(x.ac) === c.n && (x.state === "open" || (x.state === "stale" && openAtBase(x))));
+        if (ch.length) why.push(`challenge ${ch.map((x) => `${x.id} ${x.state}`).join(", ")}`);
+        const files = new Set(c.tests.map((t) => t.file).filter(Boolean));
+        for (const t of testChanges) {
+          if (t.titles.some((ti) => cites(ti, r.id, c))) why.push(`test changed: ${t.path}`);
+          else if (files.has(t.path) && t.shared) why.push(`shared test code changed: ${t.path}`);
+        }
+        if (prevC && JSON.stringify(prevC.tests.map((t) => t.name).sort()) !== JSON.stringify(c.tests.map((t) => t.name).sort())) why.push("bound tests changed");
+        for (const s of supportUsed) if (s.by.some((b) => files.has(b))) why.push(`test support changed: ${s.path}`);
+        if (supportAll.length) why.push(`support changed: ${supportAll.join(", ")}`);
+        const code = codeOwners.filter((x) => x.reqs.includes(r.id)).map((x) => x.path);
+        if (code.length) why.push(`code changed: ${code.join(", ")}`);
+        if (unowned.length) why.push(`code no commit attributes to the FASE changed: ${unowned.join(", ")}`);
+        const caps = Object.entries(c.capture_sha256 || {});
+        if (!base.plan) { if (caps.length) why.push("captures (no baseline plan to compare)"); }
+        else {
+          const old = prevC?.capture_sha256 || {};
+          const moved = [...caps.filter(([p, h]) => old[p] !== h).map(([p]) => p), ...Object.keys(old).filter((p) => !(c.capture_sha256 || {})[p])];
+          if (moved.length) why.push(`capture changed: ${[...new Set(moved)].join(", ")}`);
+        }
+        c.recheck = why.length > 0;
+        c.recheck_reasons = [...new Set(why)];
+        fTotal++; if (c.recheck) fRecheck++;
+      }
+    }
+    f.incremental = { criteria: fTotal, recheck: fRecheck };
+    total += fTotal; recheck += fRecheck;
+  }
+  return { since: base.sha, baseline: base.file, changed_files: relevant, criteria: total, recheck, carried: total - recheck };
+}
+
 function cmdAdversarial(o) {
   const sub = o._.shift();
   if (sub !== "plan") usage("accept adversarial needs `plan`");
@@ -604,6 +752,9 @@ function cmdAdversarial(o) {
     n: c.n, text: c.text, scenarios: c.scenarios,
     tests: (c.tests || []).map((t) => ({ name: t.name, file: t.file || (looksLikeFile(t.classname) ? t.classname : null), status: t.status, fresh: t.fresh })),
     captures: [...new Set((c.evidence || []).flatMap((e) => (e.attachments || []).filter((a) => a.kind === "image" && a.present).map((a) => a.path)))],
+    // sha256 of every image bound to it: the baseline an incremental round (--since) compares against
+    capture_sha256: Object.fromEntries([...(c.evidence || []).flatMap((e) => e.attachments || []), ...(c.tests || []).flatMap((t) => t.attachments || [])]
+      .filter((a) => a.kind === "image" && a.present && a.sha256).map((a) => [a.path, a.sha256]).sort(([a], [b]) => (a < b ? -1 : 1))),
     // what the capture must show (the «Se ve» contract), the images that do show it, and those that do not count
     ...(c.sees ? { sees: c.sees } : {}),
     ...(c.shown_by ? { shown_by: c.shown_by } : {}),
@@ -624,6 +775,7 @@ function cmdAdversarial(o) {
       candidate_files: candidates(f.n, null) };
   };
   const shownFases = fases.filter((f) => o.fase === undefined || f.n === o.fase).map(faseView);
+  const incremental = o.since ? markRecheck(root, o, shownFases, { commits, codePaths, byId }) : null;
   // Criteria without a bound test, over the requirements in scope (a FASE, or every active requirement).
   const inScope = o.fase !== undefined ? shownFases.flatMap((f) => f.requirements.map((r) => ({ ...r, fase: f.fase })))
     : active.map((r) => ({ ...reqView(r.id, null), fase: fases.find((f) => (f.requirements || []).includes(r.id))?.n ?? null }));
@@ -632,7 +784,7 @@ function cmdAdversarial(o) {
     .flatMap((r) => r.criteria.filter((c) => !c.tests.length).map((c) => ({ req: r.id, ac: c.n, fase: r.fase, priority: r.priority })));
   const plan = { $schema: "sdd-adversarial-plan-v1", evaluated_sha: ledger.evaluated_sha, dirty: ledger.dirty, generatedAt: ledger.generatedAt,
     scope: o.fase !== undefined ? { fase: o.fase } : null, code_paths: codePaths, adversarial_gate: ledger.adversarial_gate,
-    fases: shownFases, uncovered, fases_without_header: withoutHeader, criteria_without_test: withoutTest,
+    ...(incremental ? { incremental } : {}), fases: shownFases, uncovered, fases_without_header: withoutHeader, criteria_without_test: withoutTest,
     coverage_gaps: uncovered.length + withoutHeader.length };
   if (o.json) { out(JSON.stringify(plan, null, 2)); return 0; }
   for (const f of shownFases) {
@@ -644,6 +796,7 @@ function cmdAdversarial(o) {
   for (const r of uncovered) out(`uncovered ${r.id} (${r.priority || "-"}): in no FASE's Requisitos: line`);
   for (const f of withoutHeader) out(`fase without header FASE-${f.fase} (${f.file})`);
   for (const c of withoutTest) out(`criterion without test ${c.req} AC${c.ac}${c.fase !== null ? ` (FASE ${c.fase})` : ""}`);
+  if (incremental) out(`incremental since ${incremental.since.slice(0, 7)}: ${incremental.recheck} of ${incremental.criteria} criteria to re-check${incremental.recheck ? ` (${shownFases.flatMap((f) => f.requirements.flatMap((r) => r.criteria.filter((c) => c.recheck).map((c) => `${r.id} AC${c.n}`))).join(", ")})` : ""}`);
   out(`adversarial plan: ${shownFases.length} FASE(s) · ${uncovered.length} uncovered · ${withoutHeader.length} without header · ${withoutTest.length} criteria without test · coverage gaps ${plan.coverage_gaps} (evaluated ${ledger.evaluated_sha ? ledger.evaluated_sha.slice(0, 7) : "no git"})`);
   return 0;
 }

@@ -997,5 +997,125 @@ run accept adversarial; expect "accept adversarial without plan → 2" "$rc" 2
 run accept challenge; expect "accept challenge without add|list → 2" "$rc" 2
 run --help; has "--help documents challenge add" "sdd accept challenge add --req ID"; has "--help documents gate exit 4" "4 met, but a Must"; has "--help documents adversarial plan" "sdd accept adversarial plan"
 
+# ---------------------------------------------------------------- 20. incremental adversarial round (plan --since)
+# A later round re-reads only the criteria whose evidence moved since the previous round's plan: a test block that
+# cites it, shared test code of its file, a helper its test imports, code its requirement owns, its capture, its text,
+# an open challenge. What cannot be pinned (a config, code no commit attributes to the FASE) re-checks everything.
+repo="$tmp/inc"
+cp -R "$FIX/todo" "$repo"
+git init -q "$repo"
+profile
+printf 'evidencias/\n.sdd/\n' > "$repo/.gitignore"
+mkdir -p "$repo/tests" "$repo/evidencias/FASE-1"
+cat > "$repo/tests/todo.test.js" <<'T'
+import { add, list } from "../src/api.js";
+import { seed } from "./helpers.js";
+
+test("AC-001-01 adds", () => {
+  expect(add("Buy milk")).toBe("Buy milk");
+});
+
+test("AC-001-02 empty title", () => {
+  expect(() => add("")).toThrow("title must not be empty");
+});
+
+test("AC-002-01 order", () => {
+  expect(list(seed())).toEqual([1, 2]);
+});
+
+test("AC-002-02 empty list", () => {
+  expect(list([])).toEqual("No tasks");
+});
+T
+printf 'export const seed = () => [1, 2];\n' > "$repo/tests/helpers.js"
+commit "init"
+printf 'export const add = (t) => t;\nexport const list = (ts) => ts;\n' > "$repo/src/api.js"
+commitT "feat(todo): list" "Task: TASK-F1-001" "Refs: REQ-F-002"
+printf 'export const store = new Map();\n' > "$repo/src/store.js"
+commitT "feat(todo): store" "Task: TASK-F1-002" "Refs: REQ-F-001"
+printf 'png-1' > "$repo/evidencias/FASE-1/AC-002-01.png"
+inc_junit() {
+  mkdir -p "$repo/.sdd/junit"
+  { echo '<?xml version="1.0" encoding="UTF-8"?><testsuites><testsuite name="tests/todo.test.js" tests="4">'
+    for t in "AC-001-01 adds" "AC-001-02 empty title" "AC-002-01 order" "AC-002-02 empty list"; do
+      if [ "$t" = "AC-002-01 order" ]; then
+        echo "<testcase classname=\"tests/todo.test.js\" name=\"$t\"><system-out><![CDATA[[[ATTACHMENT|../../evidencias/FASE-1/AC-002-01.png]]]]></system-out></testcase>"
+      else echo "<testcase classname=\"tests/todo.test.js\" name=\"$t\"/>"; fi
+    done
+    echo '</testsuite></testsuites>'; } > "$repo/.sdd/junit/unit.xml"
+}
+inc_junit
+# recheck list of a plan --since run: "REQ-F-001#1,…"
+rechecked() { js 'j.fases[0].requirements.flatMap(r=>r.criteria.filter(c=>c.recheck).map(c=>r.id+"#"+c.n)).join()'; }
+reasons() { js "j.fases[0].requirements.find(r=>r.id===\"$1\").criteria.find(c=>c.n===$2).recheck_reasons.join(\" | \")"; }
+runo accept adversarial plan --fase 1 --json; printf '%s' "$out" > "$repo/.sdd/base.json"
+expect "inc: the plan carries each capture's sha256 (the baseline of the next round)" "$(js 'Object.keys(j.fases[0].requirements[1].criteria[0].capture_sha256).join()')" "evidencias/FASE-1/AC-002-01.png"
+runo accept adversarial plan --fase 1 --since .sdd/base.json --json
+expect "inc: nothing changed → nothing to re-check" "$(js 'j.incremental.recheck + "/" + j.incremental.criteria + " carried " + j.incremental.carried')" "0/4 carried 4"
+expect "inc: the baseline commit and file" "$(js 'j.incremental.since === j.evaluated_sha && j.incremental.baseline')" ".sdd/base.json"
+run accept adversarial plan --fase 1 --since .sdd/base.json
+has "inc: text summary" "incremental since"; has "inc: text summary counts" "0 of 4 criteria to re-check"
+
+# a test block that cites one criterion → only that criterion
+sed -i.bak 's/toThrow("title must not be empty")/toThrow(\/title must not be empty\/)/' "$repo/tests/todo.test.js"; rm -f "$repo/tests/todo.test.js.bak"
+commitT "test(todo): regex" "Task: TASK-F1-003" "Refs: REQ-F-001"
+runo accept adversarial plan --fase 1 --since .sdd/base.json --json
+expect "inc: a changed test block re-checks only the criterion it cites" "$(rechecked)" "REQ-F-001#2"
+contains "$(reasons REQ-F-001 2)" "test changed: tests/todo.test.js" && pass "inc: reason test changed" || bad "inc: reason test changed ($(reasons REQ-F-001 2))"
+runo accept adversarial plan --fase 1 --since "$(cd "$repo" && git rev-parse HEAD~1)" --json
+expect "inc: --since a commit works too (captures count as moved without a baseline plan)" "$(rechecked)" "REQ-F-001#2,REQ-F-002#1"
+
+# shared test code (the imports) → every criterion of that file
+( cd "$repo" && git reset -q --hard HEAD~1 )
+sed -i.bak 's/^import { seed } from ".\/helpers.js";/import { seed } from ".\/helpers.js"; \/\/ shared/' "$repo/tests/todo.test.js"; rm -f "$repo/tests/todo.test.js.bak"
+runo accept adversarial plan --fase 1 --since .sdd/base.json --json
+expect "inc: shared test code (uncommitted too) re-checks the file's criteria" "$(rechecked)" "REQ-F-001#1,REQ-F-001#2,REQ-F-002#1,REQ-F-002#2"
+( cd "$repo" && git checkout -q -- tests/todo.test.js )
+
+# a helper the test file imports → the criteria of that file; a config nobody imports → all
+printf 'export const seed = () => [1, 2, 3];\n' > "$repo/tests/helpers.js"
+runo accept adversarial plan --fase 1 --since .sdd/base.json --json
+expect "inc: a helper imported by the test file re-checks its criteria" "$(js 'j.incremental.recheck')" 4
+contains "$(reasons REQ-F-002 1)" "test support changed: tests/helpers.js" && pass "inc: reason test support" || bad "inc: reason test support ($(reasons REQ-F-002 1))"
+( cd "$repo" && git checkout -q -- tests/helpers.js )
+printf '{"name":"todo","version":"1.0.1"}\n' > "$repo/package.json"
+runo accept adversarial plan --fase 1 --since .sdd/base.json --json
+expect "inc: a config no test imports re-checks everything" "$(js 'j.incremental.recheck')" 4
+( cd "$repo" && git checkout -q -- package.json )
+printf '# notes\n' > "$repo/NOTES.md"; mkdir -p "$repo/task"; printf 'x\n' > "$repo/task/TASK-FASE-1.md"
+runo accept adversarial plan --fase 1 --since .sdd/base.json --json
+expect "inc: documents (*.md, task/) are not evidence" "$(js 'j.incremental.recheck')" 0
+rm -rf "$repo/NOTES.md" "$repo/task"
+
+# code: the requirement whose commits own the file; code no commit attributes to the FASE → all
+printf 'export const store = new Map([[0, null]]);\n' > "$repo/src/store.js"
+commitT "fix(todo): store" "Task: TASK-F1-004" "Refs: REQ-F-001"
+runo accept adversarial plan --fase 1 --since .sdd/base.json --json
+expect "inc: code owned by REQ-F-001 re-checks only its criteria" "$(rechecked)" "REQ-F-001#1,REQ-F-001#2"
+( cd "$repo" && git reset -q --hard HEAD~1 )
+printf 'export const util = 1;\n' > "$repo/src/util.js"
+commitT "chore: util" "Task: TASK-F1-005"
+runo accept adversarial plan --fase 1 --since .sdd/base.json --json
+expect "inc: code no commit attributes to the FASE re-checks everything" "$(js 'j.incremental.recheck')" 4
+( cd "$repo" && git reset -q --hard HEAD~1 )
+
+# capture bytes, requirement text, open challenge
+printf 'png-2' > "$repo/evidencias/FASE-1/AC-002-01.png"
+runo accept adversarial plan --fase 1 --since .sdd/base.json --json
+expect "inc: a changed capture re-checks its criterion" "$(rechecked)" "REQ-F-002#1"
+printf 'png-1' > "$repo/evidencias/FASE-1/AC-002-01.png"
+sed -i.bak 's/THEN the output is `No tasks`/THEN the output is `No tasks yet`/' "$repo/requirements/REQUIREMENTS.md"; rm -f "$repo/requirements/REQUIREMENTS.md.bak"
+runo accept adversarial plan --fase 1 --since .sdd/base.json --json
+expect "inc: a requirement whose text changed re-checks all its criteria" "$(rechecked)" "REQ-F-002#1,REQ-F-002#2"
+( cd "$repo" && git checkout -q -- requirements/REQUIREMENTS.md )
+run accept challenge add --req REQ-F-002 --ac 2 --category WEAKENED-ASSERT --quote 'No tasks' --evidence tests/todo.test.js:17 --verifier v --counter confirmed
+runo accept adversarial plan --fase 1 --since .sdd/base.json --json
+expect "inc: an open challenge re-checks its criterion" "$(rechecked)" "REQ-F-002#2"
+contains "$(reasons REQ-F-002 2)" "challenge CH-001 open" && pass "inc: reason open challenge" || bad "inc: reason challenge ($(reasons REQ-F-002 2))"
+run accept adversarial plan --fase 1 --since nope; expect "inc: --since neither a plan nor a commit → 2" "$rc" 2
+printf '{"x":1}' > "$repo/.sdd/bad.json"
+run accept adversarial plan --fase 1 --since .sdd/bad.json; expect "inc: --since a JSON that is not a plan → 2" "$rc" 2
+run --help; has "--help documents --since" "accept adversarial plan [--fase N] [--since PLAN.json|SHA]"
+
 [ "$fail" -eq 0 ] && echo "tests/acceptance: all passed" || echo "tests/acceptance: FAILURES"
 exit "$fail"
