@@ -559,4 +559,23 @@ echo "$o" | grep -qx '⭐ Ligera (la fijaste al crear el proyecto): Solo lo esen
   && ! grep -qE '"(huecos entre|búsqueda de huecos)|diseño y huecos' "$ROOT/plugin/hermes-sdd/hsdd_proyectos.py" "$ROOT/plugin/hermes-sdd/hsdd_textos.py" \
   && ok "taller, ruta: «fases: una fase y pocas tareas» (no «compacta: …») y sin «huecos»" || bad "ruta fases: $o"
 cd "$R"
+# «(recomendado)» en masculino también marca la recomendada; sin marca, la primera (como los botones Q): antes la puerta
+# no marcaba ninguna ⭐ y acababa en «esto lanzará: .» (taller, entrega)
+f="$T/q-masc.md"; cat > "$f" <<'Q'
+## Q-x-001 [OPEN] skill=sdd-task-implementer
+Question: ¿Reforzar?
+Para el cliente: ¿Reforzamos la prueba?
+Options:
+  A) Reforzar (recomendado)
+     efecto: editar-test tests/a.test.js
+  B) Dejarlo
+     efecto: ninguno
+Q
+o=$(python3 -c "import sys; sys.path.insert(0, '$ROOT/plugin/hermes-sdd'); import hsdd_textos as T; from pathlib import Path; print(T.preguntas([Path('$f')]))")
+echo "$o" | grep -q "⭐ recomendada" && echo "$o" | grep -q "esto lanzará: ✏️ autoriza editar tests que ya existían: tests/a.test.js (Q1)" \
+  && ok "«(recomendado)» marca la recomendada y «esto lanzará» no sale vacío" || bad "recomendado: $o"
+sed -i.bak 's/ (recomendado)//' "$f"; rm -f "$f.bak"
+o=$(python3 -c "import sys; sys.path.insert(0, '$ROOT/plugin/hermes-sdd'); import hsdd_textos as T; from pathlib import Path; print(T.preguntas([Path('$f')]))")
+echo "$o" | grep -q "A) .*⭐ recomendada" && ! echo "$o" | grep -q "esto lanzará: \.$" \
+  && ok "sin marca, la primera es la recomendada (como los botones Q)" || bad "sin marca: $o"
 exit $fail

@@ -225,7 +225,7 @@ case "$CMD" in
                      + (if ((.literal_gaps // []) | length) > 0 then " — el test no lleva la letra literal: " + ([.literal_gaps[].literal] | unique | join(", ")) else "" end)
                      + (if .visual == "missing" then " — falta su captura" else "" end)]
                 | if length > 0 then "Criterios de la FASE que no pasan la aceptación (corrígelos todos):", .[] else empty end' || true
-            } > "$REPO/.sdd/hermes/feedback/implementar-$N.txt" 2>/dev/null || true
+            } >> "$REPO/.sdd/hermes/feedback/implementar-$N.txt" 2>/dev/null || true   # >>: sin borrar lo que pidió la persona al rechazar
             # La puerta de esa FASE que quedó abierta (bloqueada por lo que este cambio resuelve) ya no tiene sentido
             # (la misma regla que puerta.sh, en el núcleo: transición abierta → superada con el cerrojo del índice)
             for tj in $(HERMES_SDD_HOME="${HERMES_SDD_HOME:-$HOME/.hermes/hermes-sdd}" python3 "$ROOT/plugin/hermes-sdd/hsdd_nucleo.py" superar "$REPO" fase "$N" "$GATE"); do

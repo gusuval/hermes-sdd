@@ -429,7 +429,7 @@ def _peticion_por_respuestas(repo: Path, proyecto: str, pet: str) -> str:
         if not cli:   # sin la pregunta en .sdd/, la versión para el cliente que dejó el notario en la petición, si la hay
             d = re.search(re.escape(qid) + r".*?Para el cliente:\s*(.*?)\s*→\s*[A-Z]\)\s*(.*?)(?=\s*(?:Q-[\w-]+-\d{3}:|$))", resto, re.S)
             cli, op = (d.group(1), d.group(2)) if d else (pregunta, op)
-        op = op or re.sub(r"\s*\((?:recommended|recomendada)\b[^)]*\)", "", opcion)
+        op = op or re.sub(r"\s*\((?:recommended|recomendad[ao])\b[^)]*\)", "", opcion)
         lineas.append(f"• {_corta(cli, 220)} → {letra}) {_corta(op, 200)}")
     if not lineas:
         return ""
@@ -779,11 +779,11 @@ def puerta_preguntas(proyecto: str, fase: str) -> dict:
 #   «  A) texto (recommended)»   «  A★) texto»   «Options: [A] texto (recomendada)  [B] texto»
 _OP_LINEA = re.compile(r"^\s+([A-Z])\s*([★⭐\ufe0f]*)\s*\)\s*(.*)$", re.M)
 _OP_CORCHETE = re.compile(r"\[([A-Z])\]\s*(.*?)(?=\s+\[[A-Z]\]|$)")
-_RECOMENDADA = re.compile(r"\((?:recommended|recomendada)\b", re.I)   # marca la recomendada (también «(recomendada, …)»)
+_RECOMENDADA = re.compile(r"\((?:recommended|recomendad[ao])\b", re.I)   # marca la recomendada (también «(recomendada, …)»)
 # Al quitar la marca para enseñar el texto, se conserva lo demás del paréntesis («(recomendada; requiere sdd-req-change)»
 # → «(requiere sdd-req-change)»: si se borraba entero, se perdía que esa opción pide un cambio de requisitos)
-_RECOMENDADA_SOLA = re.compile(r"\s*\((?:recommended|recomendada)(?:[,;]\s*(?:implementada|implemented))?\)", re.I)
-_RECOMENDADA_DENTRO = re.compile(r"\((?:recommended|recomendada)[,;]\s*", re.I)
+_RECOMENDADA_SOLA = re.compile(r"\s*\((?:recommended|recomendad[ao])(?:[,;]\s*(?:implementada|implemented))?\)", re.I)
+_RECOMENDADA_DENTRO = re.compile(r"\((?:recommended|recomendad[ao])[,;]\s*", re.I)
 
 
 def opciones(bloque: str) -> list[tuple[str, str, bool]]:
@@ -1150,7 +1150,11 @@ def preguntas(ficheros: list[Path]) -> str:
             tecnica = q.group(1).strip() if q else b.split("\n", 1)[0].lstrip("# ").strip()
             cli = para_cliente(b)
             lineas = [f"{n}. {cli}", f"   🔧 Detalle técnico: {_corta(tecnica, 160)}"] if cli else [f"{n}. {tecnica}"]
-            for letra, txt, rec in opciones(b):
+            ops = opciones(b)
+            # Sin marca de recomendada, la primera: lo mismo que los botones Q y el notario (opciones_json)
+            if ops and not any(r for _, _, r in ops):
+                ops = [(l, t, i == 0) for i, (l, t, _) in enumerate(ops)]
+            for letra, txt, rec in ops:
                 e = efecto(b, letra)
                 marca = _efecto_txt(e)
                 lineas.append(f"   {letra}) {e.get('cliente') or _MARCA_CAMBIO.sub('', txt).strip()}{'  ⭐ recomendada' if rec else ''}"
