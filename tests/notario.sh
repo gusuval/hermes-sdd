@@ -68,6 +68,21 @@ nj=$(wc -l < status/journal.jsonl 2>/dev/null || echo 0); firmar g5; nj2=$(wc -l
 # 6. aceptar una FASE sin puerta de calidad cumplida → solo rechazo
 puerta g6 fase 0; decidir g6 acepto telegram 111; firmar g6
 [ $rc -ne 0 ] && echo "$out" | grep -q "solo se admite rechazo" && ok "no acepta FASE con gate≠0/3" || bad "gate: $out"
+# 6a. «🔍 Lo he revisado y acepto» con la puerta de calidad sin cumplir: la inspección no se queda commiteada (antes HEAD
+# avanzaba con ella y todo reintento chocaba con «HEAD no es el commit mostrado»)
+REQ1=REQ-C-002   # se verifica por inspección solo en esta prueba (y se deja como estaba después)
+cp requirements/REQUIREMENTS.md "$T/req.md"
+perl -0pi -e 's/(### REQ-C-002.*?- \*\*Verification:\*\*) test[^\n]*/$1 inspection/s' requirements/REQUIREMENTS.md
+git commit -qam "test: REQ-C-002 por inspección"
+puerta g6r fase 0; t=$(mktemp)
+jq --arg r "$REQ1" '.opciones = [{verbo:"revisado", etiqueta:"🔍 Lo he revisado y acepto"}, {verbo:"rechazo", etiqueta:"❌", texto:true}]
+  | .revisar = [{id:$r, titulo:"x", como:"inspection"}]' .sdd/hermes/puertas/g6r.json > "$t" && mv "$t" .sdd/hermes/puertas/g6r.json
+h0=$(git rev-parse HEAD); d0=$(cat acceptance/decisions.jsonl 2>/dev/null | wc -l)
+decidir g6r revisado telegram 111; firmar g6r
+[ $rc -ne 0 ] && echo "$out" | grep -q "solo se admite rechazo" && [ "$(git rev-parse HEAD)" = "$h0" ] \
+  && [ -z "$(git status --porcelain --untracked-files=no)" ] && [ "$(cat acceptance/decisions.jsonl 2>/dev/null | wc -l)" = "$d0" ] \
+  && ok "revisado con la puerta de calidad sin cumplir: no commitea la inspección (HEAD no se mueve, nada a medias)" || bad "revisado: $out $(git log --oneline -2)"
+cp "$T/req.md" requirements/REQUIREMENTS.md; git commit -qam "test: REQ-C-002 como estaba"
 # 6b. «🟡 Aceptar sin lo que falta»: exime los Must sin cumplir con el motivo de la persona y una referencia de
 # seguimiento (<PROYECTO>-N) en acceptance/PENDIENTES.md; la puerta de calidad sale entonces con 3 y se acepta
 exime() { t=$(mktemp); jq '.opciones = [{verbo:"eximo", etiqueta:"🟡 Aceptar sin lo que falta", texto:true}, {verbo:"rechazo", etiqueta:"❌", texto:true}]' \
@@ -255,4 +270,65 @@ FUSION=""; FASE=1; fusionar "FASE-1 accepted"
 [ "$(git rev-parse --abbrev-ref HEAD)" = fase-1-x ] && echo "$FUSION" | grep -q "conflictos" && [ -z "$(git status --porcelain)" ] \
   && ok "con conflictos no fusiona: queda en la rama, el árbol limpio y lo avisa" || bad "conflicto: $FUSION $(git status --short)"
 cd "$R"
+# ── corrijo, idempotencia por puerta, tarjeta archivada y recuperar una firma cortada ─────────────────────────────
+mkdir -p "$T/bin2"; : > "$T/klog2"
+cat > "$T/bin2/hermes" <<H
+#!/usr/bin/env bash
+echo "\$*" >> "$T/klog2"
+case "\$*" in
+  *"boards list"*) echo '[{"slug":"repo"}]' ;;
+  *" create "*) echo '{"id":"t_9"}' ;;
+  *" complete t_arch"*) echo "task t_arch is archived" >&2; exit 1 ;;
+  *" complete t_lento"*) sleep 30 ;;
+esac
+H
+chmod +x "$T/bin2/hermes"
+tablero() { t=$(mktemp); jq --arg k "$2" '.tablero = "repo" | .tarjeta = $k | .titulo = "Aceptar FASE-0"' ".sdd/hermes/puertas/$1.json" > "$t" && mv "$t" ".sdd/hermes/puertas/$1.json"; }
+# 12. «✏️ Corregir el requisito»: antes moría (commit_si_hay se usaba antes de definirse); ahora lanza el cambio
+puerta g12 fase 0; tablero g12 t_12; t=$(mktemp)
+jq '.opciones = [{verbo:"corrijo", etiqueta:"✏️ Corregir el requisito", texto:true}, {verbo:"rechazo", etiqueta:"❌", texto:true}]' .sdd/hermes/puertas/g12.json > "$t" && mv "$t" .sdd/hermes/puertas/g12.json
+: > "$T/klog2"; decidir g12 corrijo telegram 111 "el criterio debe decir 3 tareas, no 2"; gemelo g12
+out=$(PATH="$T/bin2:$PATH" bash "$ROOT/firmar.sh" "$R" g12 2>&1); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q "pide corregir el requisito" && grep -q "Cambio INT-" "$T/klog2" \
+  && grep -rq "3 tareas, no 2" intent/ && ok "corrijo: se firma y lanza un cambio de requisitos con lo pedido" || bad "corrijo: $out $(cat "$T/klog2")"
+# 13. idempotencia por id de puerta: con la tarjeta vacía («/»), un registro anterior impedía registrar el rechazo
+puerta g13 fase 0; decidir g13 rechazo telegram 111 "falta el filtro por fecha"; firmar g13
+[ $rc -eq 0 ] && grep 'gate:g13"' acceptance/decisions.jsonl 2>/dev/null | grep -q '"result":"rejected"' \
+  && ok "el rechazo se registra aunque ya hubiera otros registros (clave: el id de la puerta)" || bad "idempotencia: $out $(tail -2 acceptance/decisions.jsonl)"
+n=$(grep -c 'gate:g13"' acceptance/decisions.jsonl); firmar g13
+[ "$(grep -c 'gate:g13"' acceptance/decisions.jsonl)" = "$n" ] && ok "repetir esa firma no lo duplica" || bad "duplica g13"
+# 14. tarjeta de la puerta ya archivada: lo firmado vale, no queda en «error» con el tag puesto
+puerta g14 plan; tablero g14 t_arch; decidir g14 conforme telegram 111; gemelo g14
+out=$(PATH="$T/bin2:$PATH" bash "$ROOT/firmar.sh" "$R" g14 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$(jq -r .estado "$HERMES_SDD_HOME/puertas/g14.json")" = firmada ] && jq -e '.aviso_tablero' "$HERMES_SDD_HOME/actas/repo/g14.json" >/dev/null \
+  && ok "tarjeta archivada: la firma termina (queda un aviso en el acta)" || bad "archivada: $out"
+# 15. recuperar: firma cortada a mitad (el notario muere cerrando la tarjeta) → se reanuda sin repetir nada
+puerta g15 plan; tablero g15 t_lento; decidir g15 conforme telegram 111; gemelo g15
+PATH="$T/bin2:$PATH" bash "$ROOT/firmar.sh" "$R" g15 >/dev/null 2>&1 &
+FP=$!
+for _ in $(seq 1 100); do jq -e '.pasos | index("historial") or index("encadenado") or index("commit")' "$HERMES_SDD_HOME/actas/repo/g15.json" >/dev/null 2>&1 && pgrep -f "complete t_lento" >/dev/null && break; sleep 0.2; done
+pkill -9 -f "complete t_lento"; kill -9 "$FP" 2>/dev/null; wait "$FP" 2>/dev/null
+t=$(mktemp); jq '.estado = "error" | .error = "el notario no termino en 10 min"' "$HERMES_SDD_HOME/puertas/g15.json" > "$t" && mv "$t" "$HERMES_SDD_HOME/puertas/g15.json"
+n1=$(git rev-list --count HEAD); pasos=$(jq -c .pasos "$HERMES_SDD_HOME/actas/repo/g15.json")
+t=$(mktemp); jq '.tarjeta = "t_ok"' .sdd/hermes/puertas/g15.json > "$t" && mv "$t" .sdd/hermes/puertas/g15.json   # la tarjeta ya se puede cerrar
+out=$(PATH="$T/bin2:$PATH" bash "$ROOT/puerta.sh" recuperar g15 2>&1); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q "Firma reanudada: Plan conforme" && [ "$(jq -r .estado "$HERMES_SDD_HOME/puertas/g15.json")" = firmada ] \
+  && [ "$(git rev-list --count HEAD)" = "$n1" ] && [ ! -d .sdd/hermes/lock ] \
+  && ok "recuperar una firma cortada a mitad ($pasos): se reanuda, sin repetir el commit, y la puerta queda firmada" || bad "recuperar: $out $pasos"
+# 16. recuperar una que no llegó a validarse: lo dejado a medias en acceptance/ se deshace y la puerta vuelve a abrirse
+puerta g16 fase 0; decidir g16 acepto telegram 111; gemelo g16
+echo '{"type":"a medias"}' >> acceptance/decisions.jsonl
+t=$(mktemp); jq '.estado = "error" | .error = "cortado"' "$HERMES_SDD_HOME/puertas/g16.json" > "$t" && mv "$t" "$HERMES_SDD_HOME/puertas/g16.json"
+out=$(bash "$ROOT/puerta.sh" recuperar g16 2>&1); rc=$?
+[ $rc -eq 0 ] && [ -z "$(git status --porcelain --untracked-files=no)" ] && [ ! -f .sdd/hermes/decisiones/g16.json ] \
+  && jq -e '.estado == "abierta" and (has("decision") | not)' "$HERMES_SDD_HOME/puertas/g16.json" >/dev/null \
+  && ok "recuperar sin validar: restaura acceptance/ y reabre la puerta para decidir otra vez" || bad "recuperar sin validar: $out $(git status --short)"
+out=$(bash "$ROOT/puerta.sh" recuperar g16 2>&1) && bad "recupera una puerta abierta" || ok "solo se recupera una puerta en error"
+# 17. transiciones: decidir.sh pasa por el núcleo (una puerta firmada no se vuelve a decidir; el verbo tiene que existir)
+mkdir -p "$HERMES_SDD_HOME"; jq '.andres.canales.local = env.USER' "$HERMES_SDD_HOME/aprobadores.json" > "$T/ap" && cp "$T/ap" "$HERMES_SDD_HOME/aprobadores.json"
+out=$(bash "$ROOT/decidir.sh" g14 conforme 2>&1) && bad "decide una puerta ya firmada" || { echo "$out" | grep -q "ya está resuelta" && ok "decidir.sh: una puerta firmada no se vuelve a decidir" || bad "firmada: $out"; }
+out=$(bash "$ROOT/decidir.sh" g16 inventado 2>&1) && bad "verbo inventado" || { echo "$out" | grep -q "Opción no válida" && ok "decidir.sh: un verbo que la puerta no ofrece, no" || bad "verbo: $out"; }
+out=$(HERMES_SDD_HOME="$HERMES_SDD_HOME" python3 "$ROOT/plugin/hermes-sdd/hsdd_nucleo.py" transicion g14 abierta 2>&1) && bad "firmada → abierta" \
+  || { echo "$out" | grep -q "no puede pasar a «abierta»" && ok "tabla de transiciones: firmada no vuelve a abierta" || bad "transición: $out"; }
+[ "$(jq 'has("estado")' .sdd/hermes/puertas/g14.json)" = false ] || bad "la copia del repo lleva estado"
 exit $fail

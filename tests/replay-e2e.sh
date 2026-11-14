@@ -14,11 +14,13 @@ paso() {  # paso <etapa> [fase] [verbo] — ejecuta la etapa y, si abre puerta, 
   [ "$(echo "$out" | jq -r .outcome)" = done ] || { bad "etapa $1 ${2:-}: $(echo "$out" | jq -r .reason)"; return 1; }
   p=$(echo "$out" | jq -r '.puerta // empty')
   if [ -n "$p" ]; then
-    bash "$ROOT/decidir.sh" "$p" "${3:-acepto}" >/dev/null 2>"$T/err" || { bad "puerta $1 ${2:-}: $(tail -1 "$T/err") [$(git -C "$R" status --porcelain | tr "\n" " ")]"; return 1; }
+    # la ruta se decide con uno de sus botones (la propuesta del método: la opción «auto»); el núcleo no admite otros
+    local v=${3:-acepto}; [ "$v" = propuesta ] && v=$(jq -r '[.opciones[] | select(.auto == true) | .verbo][0] // [.opciones[] | select(.verbo | startswith("ruta-")) | .verbo][0]' "$HERMES_SDD_HOME/puertas/$p.json")
+    bash "$ROOT/decidir.sh" "$p" "$v" >/dev/null 2>"$T/err" || { bad "puerta $1 ${2:-}: $(tail -1 "$T/err") [$(git -C "$R" status --porcelain | tr "\n" " ")]"; return 1; }
   fi
   ok "etapa $1 ${2:-}${p:+ → puerta firmada}"
 }
-paso requisitos "" acepto && paso ruta "" acepto && paso plan && paso tareas "" conforme || exit 1
+paso requisitos "" acepto && paso ruta "" propuesta && paso plan && paso tareas "" conforme || exit 1
 for n in 0 1 2 3; do paso implementar $n && paso aceptar $n "" || break; done
 paso cierre "" acepto
 tags=$(git -C "$R" tag -l 'requirements-v*' 'fase-*-accepted' 'entrega-*' | tr '\n' ' ')

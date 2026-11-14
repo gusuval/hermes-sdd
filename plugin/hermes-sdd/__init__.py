@@ -37,6 +37,7 @@ def _path_cmds() -> str:
 
 
 PATH_CMDS = _path_cmds()
+OCUPADO = 75   # firmar.sh: el repo lo tiene una etapa u otra firma (lib/candado.sh); se reintenta, no es un error
 _RT: dict = {"app": None, "pendientes": {}}   # pendientes: id del mensaje ForceReply → (puerta, verbo, persona)
 
 
@@ -379,18 +380,28 @@ async def _firmar(bot, puerta: dict) -> None:
         out, err = await asyncio.wait_for(proc.communicate(), 600)
     except asyncio.TimeoutError:
         proc.kill(); out, err = b"", b"el notario no termino en 10 min"
-    idx = HOME / "puertas" / f"{gid}.json"
-    with N.cerrojo():
-        p = _leer(idx) or puerta
+    if proc.returncode == OCUPADO:   # una etapa (u otra firma) tiene el repo: se firma en cuanto lo suelte
+        log.info("hermes-sdd: %s: el repo está ocupado; se firma en la próxima vuelta", gid)
+        try:
+            N.marcar(gid, firmar_en=time.time() + 30)
+        except N.Rechazo:
+            pass
+        return
+    # El estado cambia por la tabla de transiciones del núcleo (decidida → firmada | error), con su cerrojo
+    try:
         if proc.returncode == 0:
-            p["estado"] = "firmada"; p["resultado"] = out.decode("utf-8", errors="replace").strip().splitlines()[-1] if out else "firmada"
+            resultado = out.decode("utf-8", errors="replace").strip().splitlines()[-1] if out.strip() else "firmada"
+            p = N.transicion(gid, "firmada", resultado=resultado, error=None)
             texto = f"{_cabecera(p)}\n{_resultado_claro(p['resultado'])}"
         else:
-            p["estado"] = "error"; p["error"] = err.decode("utf-8", errors="replace").strip()[-500:]
+            p = N.transicion(gid, "error", error=err.decode("utf-8", errors="replace").strip()[-500:])
             texto = (f"{_cabecera(p)}\n⚠️ Tu decisión no se ha podido registrar, así que no se ha aplicado.\n"
                      f"Motivo: {p['error'].replace('NOTARIO: rechazado — ', '')}\n"
-                     "Normalmente es porque el proyecto cambió después de abrir esta puerta: espera a la siguiente.")
-        _escribir(idx, p)
+                     "Normalmente es porque el proyecto cambió después de abrir esta puerta: espera a la siguiente.\n"
+                     f"(Para recuperarla: bash puerta.sh recuperar {gid})")
+    except N.Rechazo as e:
+        log.warning("hermes-sdd: %s: %s", gid, e)
+        return
     await _editar(bot, p, texto, None)
 
 

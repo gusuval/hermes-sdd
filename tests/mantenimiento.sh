@@ -30,7 +30,7 @@ if [ "$GATE_OK" = 0 ] || [ "$GATE_OK" = 3 ]; then
 else
   G0=$(echo "$out" | tail -1)
   [ "$(claves "$G0")" = "gate " ] && ok "gate global incumplido → puerta de mantenimiento" || bad "gate: $out"
-  r=$(decidir "$G0" ignoro); echo "$r" | grep -q "necesita un texto" && ok "ignorar exige motivo" || bad "ignorar sin motivo: $r"
+  r=$(decidir "$G0" ignoro); echo "$r" | grep -q "necesita un motivo" && ok "ignorar exige motivo (lo comprueba el núcleo, antes del notario)" || bad "ignorar sin motivo: $r"
   rm -f "$HERMES_SDD_HOME/actas/local/$G0.json"
   decidir "$G0" ignoro "es el ejemplo del curso" >/dev/null && ok "ignorado con motivo" || bad "ignorar"
   vigilar; echo "$out" | grep -q "sin hallazgos nuevos" && ok "lo ignorado no vuelve a preguntarse" || bad "repite: $out"

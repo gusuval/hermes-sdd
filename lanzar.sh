@@ -222,12 +222,9 @@ case "$CMD" in
                 | if length > 0 then "Criterios de la FASE que no pasan la aceptación (corrígelos todos):", .[] else empty end' || true
             } > "$REPO/.sdd/hermes/feedback/implementar-$N.txt" 2>/dev/null || true
             # La puerta de esa FASE que quedó abierta (bloqueada por lo que este cambio resuelve) ya no tiene sentido
-            for f in "${HERMES_SDD_HOME:-$HOME/.hermes/hermes-sdd}"/puertas/*.json; do
-              [ -f "$f" ] || continue
-              jq -e --arg b "$BOARD" --arg n "$N" '.tablero == $b and .tipo == "fase" and (.fase | tostring) == $n and .estado == "abierta"' "$f" >/dev/null 2>&1 || continue
-              tj=$(jq -r '.tarjeta // empty' "$f")
-              jq --arg g "$GATE" '.estado = "superada" | .superada_por = $g' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-              [ -n "$tj" ] && "${K[@]}" archive "$tj" >/dev/null 2>&1 || true
+            # (la misma regla que puerta.sh, en el núcleo: transición abierta → superada con el cerrojo del índice)
+            for tj in $(HERMES_SDD_HOME="${HERMES_SDD_HOME:-$HOME/.hermes/hermes-sdd}" python3 "$ROOT/plugin/hermes-sdd/hsdd_nucleo.py" superar "$REPO" fase "$N" "$GATE"); do
+              "${K[@]}" archive "$tj" >/dev/null 2>&1 || true
             done
             echo "Cambio sin replanificar (requisitos de las FASEs $RF): se rehace la FASE-$N"
             fase_n "$N" " (requisitos nuevos)"
