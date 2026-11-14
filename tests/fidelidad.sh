@@ -224,6 +224,52 @@ o=$(python3 "$F" lint_capturas "$L" --json)
 echo "$o" | jq -e '.lint_capturas | any(.codigo == "C-03" and .req == "REQ-F-008" and .ac == 4 and .grave)' >/dev/null \
   && ok "lint de capturas: la captura de REQ-F-008 AC4 en un test.step de otro test es grave" || bad "lint_capturas: $o"
 
+# 4h. captura mala en un test YA ACEPTADO (existe en el último fase-*-accepted): el implementador no puede editarlo, así
+# que no lanza la pasada de arreglo; llega a la puerta como pregunta «editar-test <fichero>». La de un test nuevo, sí
+# va a la pasada. Con permiso firmado (test-edit tras la aceptación), el congelado también se arregla en la pasada.
+G="$T/congeladas"; mkdir -p "$G/tests/e2e" "$G/requirements" "$G/.sdd/hermes" "$G/acceptance"; cd "$G"
+git init -q -b main; git config user.email t@t; git config user.name t; git config commit.gpgsign false
+printf '### REQ-F-002: Lista de espera con puesto\n' > requirements/REQUIREMENTS.md
+echo "test('REQ-F-002 AC1', () => {})" > tests/e2e/viejo.spec.js; : > acceptance/decisions.jsonl
+git add -A; git commit -qm fase0; git tag fase-0-accepted
+echo "test('REQ-F-009 AC1', () => {})" > tests/e2e/nuevo.spec.js; git add -A; git commit -qm fase1
+cat > .sdd/hermes/fidelidad-1.json <<'J'
+{"graves": 3, "congelados": [], "capturas": [], "mutantes": [], "coherencia": [], "lint_capturas": [
+ {"codigo": "C-01", "fichero": "tests/e2e/viejo.spec.js", "linea": 12, "req": "REQ-F-002", "ac": 1, "mensaje": "capture after an API check", "grave": true},
+ {"codigo": "C-03", "fichero": "tests/e2e/viejo.spec.js", "linea": 30, "req": "REQ-F-002", "ac": 2, "mensaje": "capture in another test", "grave": true},
+ {"codigo": "C-01", "fichero": "tests/e2e/nuevo.spec.js", "linea": 5, "req": "REQ-F-009", "ac": 1, "mensaje": "capture after an API check", "grave": true},
+ {"codigo": "C-09", "fichero": "tests/e2e/viejo.spec.js", "linea": 40, "mensaje": "aviso", "grave": false}]}
+J
+REPO="$G"; FASE=1
+eval "$(sed -n '/^graves_arreglables()/,/^}/p' "$ROOT/etapa.sh")"
+n=$(graves_arreglables); H=$(python3 "$ROOT/plugin/hermes-sdd/hsdd_hallazgos.py" lineas "$G" 1)
+[ "$n" = 1 ] && echo "$H" | grep -q 'nuevo.spec.js:5' && ! echo "$H" | grep -q 'viejo.spec.js' \
+  && ok "captura mala en un test ya aceptado: no cuenta para la pasada de arreglo; la del test nuevo, sí" || bad "arreglables: $n / $H"
+q=$(cat .sdd/questions-fidelidad.md 2>/dev/null)
+[ "$(grep -c '^## Q-fidelidad-' <<< "$q")" = 1 ] && grep -q '^## Q-fidelidad-001 \[OPEN\] .*congelado=fase-0-accepted' <<< "$q" \
+  && grep -q '^     efecto: editar-test tests/e2e/viejo.spec.js$' <<< "$q" && grep -q 'C-03 line 30 (REQ-F-002 AC2)' <<< "$q" \
+  && grep -q '^Para el cliente: Algunas capturas de una prueba que ya aceptaste (de «Lista de espera con puesto»)' <<< "$q" \
+  && ok "…y llega a la puerta como pregunta propuesta «editar-test tests/e2e/viejo.spec.js» (una por fichero)" || bad "pregunta: $q"
+python3 - "$ROOT/plugin/hermes-sdd" "$G" <<'PY' && ok "la pregunta es del formato nuevo y la puerta la enseña con su efecto" || bad "formato de la pregunta"
+import sys; sys.path.insert(0, sys.argv[1]); import hsdd_textos as T
+from pathlib import Path
+f = Path(sys.argv[2]) / ".sdd/questions-fidelidad.md"
+b = T.bloques_preguntas([f])["Q-fidelidad-001"]
+assert T.errores_pregunta(b) == [], T.errores_pregunta(b)
+assert T.efecto(b, "A")["efecto"] == "editar-test" and T.efecto(b, "A")["ficheros"] == ["tests/e2e/viejo.spec.js"]
+assert T.opciones_json(b)["recomendada"] == "A" and T.efecto(b, "B")["efecto"] == "ninguno"
+assert "(✏️ autoriza editar tests/e2e/viejo.spec.js)" in T.preguntas([f])
+PY
+graves_arreglables >/dev/null; sed -i.bak 's/\[OPEN\]/[ANSWERED]/' .sdd/questions-fidelidad.md; rm -f .sdd/questions-fidelidad.md.bak; graves_arreglables >/dev/null
+[ "$(grep -c '^## Q-fidelidad-' .sdd/questions-fidelidad.md)" = 1 ] \
+  && ok "no se repite la pregunta (abierta, o contestada «se queda como está») hasta la aceptación siguiente" || bad "repetida: $(cat .sdd/questions-fidelidad.md)"
+echo '{"type":"test-edit","files":["tests/e2e/viejo.spec.js"],"question":"Q-fidelidad-001","head":"x"}' >> acceptance/decisions.jsonl
+git commit -qam "docs(acceptance): test-edit"
+[ "$(graves_arreglables)" = 3 ] && ok "con permiso firmado para editarlo, el test congelado vuelve a la pasada de arreglo" || bad "autorizado: $(graves_arreglables)"
+jq -n '{graves: 1, error: "hsdd_fidelidad falló"}' > .sdd/hermes/fidelidad-1.json
+[ "$(graves_arreglables)" = 1 ] && ok "si la fidelidad falló, sigue habiendo pasada de arreglo" || bad "error de fidelidad"
+cd "$R"
+
 # 5. OCR de verdad (solo en macOS): una imagen con texto
 if command -v swiftc >/dev/null && command -v sips >/dev/null; then
   cat > "$T/img.swift" <<'S'

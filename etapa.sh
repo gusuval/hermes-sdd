@@ -190,25 +190,20 @@ fidelidad() {  # ronda adversarial del método + hsdd_fidelidad de la FASE (deja
   # Rápida (sin mutantes): decide si hace falta la pasada de arreglo. Los mutantes, una sola vez, antes de la puerta
   python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" --fase "$FASE" --sin-mutantes >/dev/null 2>&1 || jq -n '{graves: 1, error: "hsdd_fidelidad falló: no hay comprobación de fidelidad"}' > ".sdd/hermes/fidelidad-$FASE.json"   # un fallo no deja valer el JSON anterior
 }
-hay_hallazgos() {  # impugnaciones abiertas sobre un Must o hallazgos graves de fidelidad
-  [ "$(node "$SDD" accept challenge list --open --fase "$FASE" --json 2>/dev/null | jq -r '.must_open // ([.challenges[]? | select(.state == "open")] | length)')" != 0 ] && return 0
-  [ "$(jq -r '.graves // 0' ".sdd/hermes/fidelidad-$FASE.json" 2>/dev/null || echo 0)" -gt 0 ]
+graves_arreglables() {  # graves de fidelidad que la pasada de arreglo puede arreglar. Una captura mala (sdd lint
+  # --captures) en un test ya aceptado y sin permiso firmado no: el implementador no puede tocarlo y solo escribía una
+  # pregunta [OPEN]; va a la puerta como pregunta «editar-test <fichero>» (.sdd/questions-fidelidad.md) y decide la persona
+  python3 "$ROOT/plugin/hermes-sdd/hsdd_hallazgos.py" arreglables "$REPO" "$FASE" 2>/dev/null ||
+    jq -r '.graves // 0' ".sdd/hermes/fidelidad-$FASE.json" 2>/dev/null || echo 0
 }
-hallazgos() {  # en una línea por hallazgo, para el implementador
+hay_hallazgos() {  # impugnaciones abiertas sobre un Must o hallazgos graves de fidelidad que la pasada puede arreglar
+  [ "$(node "$SDD" accept challenge list --open --fase "$FASE" --json 2>/dev/null | jq -r '.must_open // ([.challenges[]? | select(.state == "open")] | length)')" != 0 ] && return 0
+  [ "$(graves_arreglables)" -gt 0 ]
+}
+hallazgos() {  # en una línea por hallazgo, para el implementador (sin las capturas de tests congelados: son preguntas)
   node "$SDD" accept challenge list --open --fase "$FASE" --json 2>/dev/null | jq -r '.challenges[]? | select(.state == "open")
     | "- \(.id) \(.req) AC\(.ac) [\(.category)]: «\(.quote)» — evidencia: \((.evidence // []) | map(if type == "object" then (.path + (if .line then ":\(.line)" else "" end)) else tostring end) | join(", "))"' 2>/dev/null
-  python3 - ".sdd/hermes/fidelidad-$FASE.json" <<'PY' 2>/dev/null
-import json, sys
-r = json.load(open(sys.argv[1]))
-for x in r.get("congelados", []):
-    if x.get("grave"): print(f"- test ya aceptado cambiado ({x['fichero']}, {x['commit']}): {x['autorizacion']}; {', '.join(x['debilitamiento'])}")
-for x in r.get("capturas", []):
-    if x.get("grave"): print(f"- {x['req']} AC{x['ac']}: la captura {', '.join(x['capturas'])} no enseña {', '.join(x['no_se_ve'])}")
-for x in r.get("lint_capturas", []):
-    if x.get("grave"): print(f"- {x['fichero']}{':' + str(x['linea']) if x.get('linea') else ''} [{x['codigo']}]: {x['mensaje']}")
-for x in r.get("mutantes", []):
-    if x.get("grave"): print(f"- {x['req']} AC{x['ac']}: si «{x['texto']}» cambia en {', '.join(x.get('en', []))}, ningún test lo nota")
-PY
+  python3 "$ROOT/plugin/hermes-sdd/hsdd_hallazgos.py" lineas "$REPO" "$FASE" 2>/dev/null
 }
 # Granularidad del plan (la fija la ruta firmada en .sdd/hermes/granularidad): compacta | normal | fina. «auto» se
 # resuelve aquí: compacta si el proyecto es pequeño (≤ 7 REQ-F, un tipo de usuario, sin integraciones,
@@ -470,7 +465,7 @@ PY
     # tests ya aceptados tocados sin autorizar, ejemplos incoherentes. Lo grave se arregla aquí, una vez, y no en una
     # vuelta de rechazo (club: de 9 implementaciones, 5 fueron repeticiones por esto; cada vuelta, 30-50 min)
     python3 "$ROOT/plugin/hermes-sdd/hsdd_fidelidad.py" aceptacion "$REPO" --fase "$FASE" --sin-mutantes >/dev/null 2>&1 || jq -n '{graves: 1, error: "hsdd_fidelidad falló: no hay comprobación de fidelidad"}' > ".sdd/hermes/fidelidad-$FASE.json"   # un fallo no deja valer el JSON anterior
-    if [ "$(jq -r '.graves // 0' ".sdd/hermes/fidelidad-$FASE.json" 2>/dev/null || echo 0)" -gt 0 ]; then
+    if [ "$(graves_arreglables)" -gt 0 ]; then
       claude_etapa task-implementer "/sdd-task-implementer --fase=$FASE — $ARNES Before handing FASE-$FASE over, a quick check found these problems. Fix each one (a task and a commit each); a problem with a capture is a rule: apply it to every capture of the FASE, not only the one cited:$(hallazgos | grep -v '^- CH-' | tr '\n' ' ')"
     fi
     base=$(git describe --tags --abbrev=0 --match 'fase-*-accepted' 2>/dev/null || git describe --tags --abbrev=0 --match 'requirements-v*' 2>/dev/null || git rev-list --max-parents=0 HEAD)
