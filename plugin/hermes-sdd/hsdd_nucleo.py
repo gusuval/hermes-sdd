@@ -204,9 +204,10 @@ def _registrar(idx: Path, puerta: dict, verbo: str, texto: str, actor: dict, pru
 
 
 def decidir(gid: str, verbo: str, texto: str, persona: str, canal: str, ident: str, prueba: dict,
-            ventana_s: int | None = None) -> dict:
+            ventana_s: int | None = None, firma_gateway: bool = False) -> dict:
     """Registra la decisión de `persona` (ya identificada por el canal) y abre la ventana de deshacer (`ventana_s`, o la
-    configurada). Devuelve la puerta actualizada. Lanza Rechazo si no procede."""
+    configurada). Devuelve la puerta actualizada. Lanza Rechazo si no procede. `firma_gateway` (canal local con
+    `decidir.sh --en`): la firma el gateway al vencer la ventana, como las de Telegram, en vez de decidir.sh."""
     if canal == JEV:
         raise Rechazo("Jev decide solo con aplicar_jev")
     with cerrojo():
@@ -228,8 +229,12 @@ def decidir(gid: str, verbo: str, texto: str, persona: str, canal: str, ident: s
         texto = (texto or "").strip()
         if opcion.get("texto") and not texto:
             raise Rechazo(f"«{opcion['etiqueta']}» necesita un motivo")
-        return _registrar(idx, puerta, verbo, texto, {"persona": persona, "canal": canal, "id": str(ident)}, prueba,
-                          ventana_s=ventana_s)
+        puerta = _registrar(idx, puerta, verbo, texto, {"persona": persona, "canal": canal, "id": str(ident)}, prueba,
+                            ventana_s=ventana_s)
+        if firma_gateway:
+            puerta["firma_gateway"] = True
+            escribir(idx, puerta)
+        return puerta
 
 
 def deshacer(gid: str, persona: str) -> dict:
@@ -248,6 +253,7 @@ def deshacer(gid: str, persona: str) -> dict:
             puerta["jev_vetado"] = {"por": persona, "at": ahora()}
         puerta.pop("decision", None)
         puerta.pop("firmar_en", None)
+        puerta.pop("firma_gateway", None)
         escribir(idx, puerta)
         return puerta
 
@@ -600,10 +606,29 @@ if __name__ == "__main__":   # CLI del notario y de jev.sh
             persona = persona_de(canal, ident)[0]
             if not persona:
                 raise Rechazo(f"{ident} no está en aprobadores.json con canal {canal}")
-            # decidir.sh firma en el acto (el gateway no firma el canal local): la ventana solo aparta al gateway
-            p = decidir(gid, verbo, texto, persona, canal, ident, json.loads(a[6]) if len(a) > 6 else {},
-                        ventana_s=86400 if canal == "local" else None)
+            # Sin [ventana]: decidir.sh firma en el acto (el gateway no firma el canal local) y la ventana solo aparta al
+            # gateway. Con [ventana] (decidir.sh --en): segundos para deshacer, o «config» (la de nuevo.sh config
+            # --deshacer); al vencer la firma el gateway, como las de Telegram.
+            ventana = a[7] if len(a) > 7 and a[7] != "" else None
+            if ventana is None:
+                p = decidir(gid, verbo, texto, persona, canal, ident, json.loads(a[6]) if len(a) > 6 and a[6] else {},
+                            ventana_s=86400 if canal == "local" else None)
+            else:
+                if ventana != "config" and not (ventana.isdigit() and 1 <= int(ventana) <= DESHACER_MAX_S):
+                    raise Rechazo(f"--en: segundos entre 1 y {DESHACER_MAX_S}, o «config» (no «{ventana}»)")
+                p = decidir(gid, verbo, texto, persona, canal, ident, json.loads(a[6]) if len(a) > 6 and a[6] else {},
+                            ventana_s=deshacer_s() if ventana == "config" else int(ventana), firma_gateway=True)
             print(json.dumps(p["decision"], ensure_ascii=False))
+            sys.exit(0)
+        if a[:1] == ["deshacer"]:         # deshacer <puerta> <canal> <id>: vuelve a «abierta» mientras no esté firmada
+            gid, canal, ident = a[1:4]
+            persona = persona_de(canal, ident)[0]
+            if not persona:
+                raise Rechazo(f"{ident} no está en aprobadores.json con canal {canal}")
+            dec = (leer(indice(gid), {}) or {}).get("decision") or {}
+            if dec.get("actor", {}).get("canal") == "local" and not (leer(indice(gid), {}) or {}).get("firma_gateway"):
+                raise Rechazo("Ya no se puede deshacer: decidir.sh sin --en la firma en el acto")
+            deshacer(gid, persona)
             sys.exit(0)
         if a[:1] == ["modo"]:             # modo [<modo> [<tablero>]]
             if len(a) > 1:
@@ -615,5 +640,6 @@ if __name__ == "__main__":   # CLI del notario y de jev.sh
         sys.exit(2)
     print("uso: hsdd_nucleo.py permite-jev <puerta.json> <verbo> <p> | modo [<modo> [<tablero>]] | rejuzgar <puerta>\n"
           "       | transicion <puerta> <estado> [--desde a,b] [k=v | k:=json | -k]... | superar <repo> <tipo> <fase> <por> [excepto]\n"
-          "       | decidir <puerta> <verbo> <texto> <canal> <id> [prueba-json]", file=sys.stderr)
+          "       | decidir <puerta> <verbo> <texto> <canal> <id> [prueba-json] [segundos|config] | deshacer <puerta> <canal> <id>",
+          file=sys.stderr)
     sys.exit(2)
