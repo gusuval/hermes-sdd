@@ -564,12 +564,79 @@ def _ejecuta(copia: Path, cmd: list[str], minutos: int = 10) -> bool:
         return False
 
 
-def mutantes(repo: Path, copia: Path, acc: dict, solo_must: bool = True) -> list[dict]:
+# Caché de mutantes en .sdd/hermes/mutantes-cache.json: el resultado de un mutante depende del texto que se cambia, de
+# los ficheros de la app que lo contienen y de los tests que se ejecutan (más los helpers y la configuración de los
+# tests): con la clave por hash de todo eso, un mutante ya ejecutado no se repite (re-aceptaciones, el cierre con los
+# Must de todas las FASEs) y cualquier cambio en esos ficheros lo invalida. La línea base (¿los tests pasan sin mutar?)
+# depende además de toda la app: su clave lleva el hash de src/ entero.
+CACHE_MUT = "mutantes-cache.json"
+CACHE_MUT_MAX = 4000
+_CONFIG_TESTS = ("package.json", "package-lock.json", "playwright.config.js", "playwright.config.ts", "playwright.config.mjs",
+                 "vitest.config.js", "vitest.config.ts", "vitest.config.mjs", "vite.config.js", "vite.config.ts", "vite.config.mjs")
+
+
+def _sha(*partes: bytes) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    for b in partes:
+        h.update(hashlib.sha256(b).digest())
+    return h.hexdigest()
+
+
+def _hash_ficheros(base: Path, rels) -> str:
+    """Hash de (ruta, contenido) de cada fichero; uno que no existe cuenta como vacío con su ruta."""
+    trozos = []
+    for r in sorted(set(rels)):
+        p = base / r
+        trozos += [r.encode(), p.read_bytes() if p.is_file() else b"\0ausente"]
+    return _sha(*trozos)
+
+
+def _soporte_tests(copia: Path) -> list[str]:
+    """Lo que no es un test pero cambia lo que un test hace: helpers, fixtures y la configuración de la suite."""
+    out = [c for c in _CONFIG_TESTS if (copia / c).is_file()]
+    t = copia / "tests"
+    if t.is_dir():
+        out += [str(p.relative_to(copia)) for p in t.rglob("*") if p.is_file() and "node_modules" not in p.parts
+                and not re.search(r"\.(spec|test)\.[a-z]+$", p.name)]
+    return out
+
+
+def _leer_cache(repo: Path) -> dict:
+    try:
+        c = json.loads((repo / ".sdd" / "hermes" / CACHE_MUT).read_text(encoding="utf-8"))
+        return c if isinstance(c, dict) and c.get("v") == 1 and isinstance(c.get("r"), dict) else {"v": 1, "r": {}}
+    except (OSError, ValueError):
+        return {"v": 1, "r": {}}
+
+
+def _guardar_cache(repo: Path, c: dict) -> None:
+    r = c["r"]
+    if len(r) > CACHE_MUT_MAX:   # las más recientes
+        c["r"] = dict(sorted(r.items(), key=lambda kv: kv[1].get("t", 0))[-CACHE_MUT_MAX:])
+    f = repo / ".sdd" / "hermes" / CACHE_MUT
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(c, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(f)
+    except OSError:
+        pass
+
+
+def mutantes(repo: Path, copia: Path, acc: dict, solo_must: bool = True, stats: dict | None = None) -> list[dict]:
     """Para cada texto que un criterio dice que se ve: se cambia en el código de la app (src/) de la copia y se
     ejecutan los tests que el método enlaza a ese criterio. Si todos siguen pasando, el criterio está «verificado»
-    sin que ningún test lo compruebe. Se separa si lo detecta un e2e (lo que se ve en el vídeo) o solo un unitario."""
+    sin que ningún test lo compruebe. Se separa si lo detecta un e2e (lo que se ve en el vídeo) o solo un unitario.
+    Lo ya ejecutado con los mismos ficheros sale de la caché (.sdd/hermes/mutantes-cache.json)."""
+    import time
     out, cache = [], {}
     fuentes = [p for p in (copia / "src").rglob("*") if p.is_file() and p.suffix in (".js", ".ts", ".jsx", ".tsx", ".html", ".vue", ".svelte", ".mjs")]
+    persistente = _leer_cache(repo)
+    stats = stats if stats is not None else {}
+    stats.update({"de_cache": 0, "ejecutados": 0})
+    soporte = _hash_ficheros(copia, _soporte_tests(copia))
+    app = _hash_ficheros(copia, [str(p.relative_to(copia)) for p in (copia / "src").rglob("*") if p.is_file()])
     for r in acc.get("requirements", []):
         if (solo_must and r.get("priority") != "Must") or not _en_alcance(acc, r):
             continue
@@ -593,15 +660,28 @@ def mutantes(repo: Path, copia: Path, acc: dict, solo_must: bool = True) -> list
                 # Línea base: si los tests del criterio ya fallan sin mutar nada, cualquier mutante «muere» y no dice nada
                 # (club, FASE-3: dos e2e rotos daban «lo detecta un e2e» a todo y la aceptación tardó 45 min)
                 bkey = ("base", tuple(e2e), tuple(uni))
+                tests_h = _hash_ficheros(copia, [*e2e, *uni])
+                pbkey = "base:" + _sha(app.encode(), soporte.encode(), tests_h.encode())
+                if bkey not in cache and pbkey in persistente["r"]:
+                    cache[bkey] = tuple(persistente["r"][pbkey]["r"])
                 if bkey not in cache:
                     cache[bkey] = ((not e2e or _ejecuta(copia, ["npx", "playwright", "test", *e2e])),
                                    (not uni or _ejecuta(copia, ["npx", "vitest", "run", *uni], 5)))
+                    if all(cache[bkey]):   # un fallo (quizá intermitente) no se guarda: se vuelve a probar
+                        persistente["r"][pbkey] = {"r": list(cache[bkey]), "t": time.time()}
                 base_e2e, base_uni = cache[bkey]
                 if not (base_e2e and base_uni):
                     out.append({**base, "resultado": "sus tests ya fallan sin mutar nada", "grave": True,
                                 "fallan": ([*e2e] if not base_e2e else []) + ([*uni] if not base_uni else [])})
                     continue
+                pkey = "mut:" + _sha(lit.encode(), _hash_ficheros(copia, [str(p.relative_to(copia)) for p in con]).encode(),
+                                     _hash_ficheros(copia, [*e2e, *uni, *sueltos]).encode(), "|".join(e2e).encode(),
+                                     "|".join(uni).encode(), "|".join(sueltos).encode(), soporte.encode())
+                if clave not in cache and pkey in persistente["r"]:
+                    cache[clave] = tuple(persistente["r"][pkey]["r"])
+                    stats["de_cache"] += 1
                 if clave not in cache:
+                    stats["ejecutados"] += 1
                     originales = {p: p.read_text(encoding="utf-8", errors="replace") for p in con}
                     try:
                         for p, t in originales.items():
@@ -613,6 +693,8 @@ def mutantes(repo: Path, copia: Path, acc: dict, solo_must: bool = True) -> list
                         for p, t in originales.items():
                             p.write_text(t, encoding="utf-8")
                     cache[clave] = (muere_e2e, muere_uni, muere_suelto)
+                    persistente["r"][pkey] = {"r": list(cache[clave]), "t": time.time()}
+                    _guardar_cache(repo, persistente)   # tras cada mutante: si la etapa se corta, lo hecho no se pierde
                 muere_e2e, muere_uni, muere_suelto = cache[clave]
                 res = ("lo detecta un e2e" if muere_e2e
                        else "lo detecta un e2e que el método no enlaza a este criterio" if muere_suelto
@@ -621,6 +703,7 @@ def mutantes(repo: Path, copia: Path, acc: dict, solo_must: bool = True) -> list
                 out.append({**base, "resultado": res, "en": [str(p.relative_to(copia)) for p in con], "e2e_sueltos": sueltos if muere_suelto else [],
                             "grave": not (muere_e2e or muere_uni or muere_suelto),
                             "solo_unitario": muere_uni and not (muere_e2e or muere_suelto)})
+    _guardar_cache(repo, persistente)
     return out
 
 
@@ -660,7 +743,8 @@ def de_aceptacion(repo: Path, fase: str | None, con_mutantes: bool = True) -> di
                            capture_output=True)
             if (repo / "node_modules").is_dir():
                 (copia / "node_modules").symlink_to(repo / "node_modules")
-            res["mutantes"] = mutantes(repo, copia, acc)
+            res["mutantes_cache"] = {}
+            res["mutantes"] = mutantes(repo, copia, acc, stats=res["mutantes_cache"])
         except Exception as e:   # sin copia no hay mutantes: se dice, no se inventa
             res["mutantes_error"] = str(e)[:300]
         finally:

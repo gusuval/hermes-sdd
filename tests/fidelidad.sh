@@ -224,6 +224,46 @@ o=$(python3 "$F" lint_capturas "$L" --json)
 echo "$o" | jq -e '.lint_capturas | any(.codigo == "C-03" and .req == "REQ-F-008" and .ac == 4 and .grave)' >/dev/null \
   && ok "lint de capturas: la captura de REQ-F-008 AC4 en un test.step de otro test es grave" || bad "lint_capturas: $o"
 
+# 4h. caché de mutantes por hash (fuente + test + mutación): un mutante ya ejecutado no se repite (re-aceptación, cierre);
+# cambiar el fichero que lo contiene, su test o un helper lo invalida; una línea base que falla no se guarda
+python3 - "$ROOT/plugin/hermes-sdd" "$T/mut" <<'PY' && ok "mutantes: caché por hash en .sdd/hermes, invalidada al cambiar la fuente, el test o un helper" || bad "caché de mutantes"
+import sys; sys.path.insert(0, sys.argv[1]); import hsdd_fidelidad as F
+from pathlib import Path
+R = Path(sys.argv[2]); C = R / "copia"
+for d in ("src", "tests/helpers"): (C / d).mkdir(parents=True, exist_ok=True)
+(C / "src" / "app.js").write_text("export const t = 'Hola mundo'\n")
+(C / "src" / "otro.js").write_text("export const x = 1\n")
+(C / "tests" / "app.test.js").write_text("it('REQ-F-001 AC1', () => expect(t).toBe('Hola mundo'))\n")
+(C / "tests" / "helpers" / "h.js").write_text("export const h = 1\n")
+acc = {"requirements": [{"id": "REQ-F-001", "priority": "Must", "criteria": [{"n": 1,
+       "text": "GIVEN x WHEN y THEN ve el mensaje «Hola mundo»", "tests": [{"file": "tests/app.test.js", "name": "REQ-F-001 AC1"}]}]}]}
+llamadas = []
+def ejecuta(copia, cmd, minutos=10):
+    llamadas.append(cmd); return "MUTANTE" not in (copia / "src" / "app.js").read_text()   # el test nota el mutante
+F._ejecuta = ejecuta
+def corre():
+    llamadas.clear(); st = {}; out = F.mutantes(R, C, acc, stats=st); return out, st, len(llamadas)
+out, st, n = corre()
+assert out[0]["resultado"] == "solo lo detecta un unitario" and st == {"de_cache": 0, "ejecutados": 1} and n == 2, (out, st, n)
+assert (R / ".sdd" / "hermes" / "mutantes-cache.json").is_file()
+out2, st, n = corre()
+assert n == 0 and st == {"de_cache": 1, "ejecutados": 0} and out2 == out, (out2, st, n)   # nada se repite
+(C / "src" / "otro.js").write_text("export const x = 2\n")    # otro fichero de la app: la línea base, no el mutante
+out, st, n = corre(); assert n == 1 and st["de_cache"] == 1, (st, n)
+(C / "src" / "app.js").write_text("export const t = 'Hola mundo' // v2\n")   # la fuente del texto: se repite
+out, st, n = corre(); assert st["ejecutados"] == 1, st
+(C / "tests" / "app.test.js").write_text("it('REQ-F-001 AC1', () => expect(t).toContain('Hola'))\n")   # su test
+out, st, n = corre(); assert st["ejecutados"] == 1, st
+(C / "tests" / "helpers" / "h.js").write_text("export const h = 2\n")   # un helper de los tests
+out, st, n = corre(); assert st["ejecutados"] == 1, st
+out, st, n = corre(); assert n == 0, n
+# una línea base que falla (quizá intermitente) no se guarda: la siguiente vez se vuelve a probar
+F._ejecuta = lambda copia, cmd, minutos=10: (llamadas.append(cmd), False)[1]
+(C / "src" / "otro.js").write_text("export const x = 3\n")
+out, st, n = corre(); assert out[0]["resultado"] == "sus tests ya fallan sin mutar nada" and n == 1, (out, n)
+out, st, n = corre(); assert n == 1, n
+PY
+
 # 5. OCR de verdad (solo en macOS): una imagen con texto
 if command -v swiftc >/dev/null && command -v sips >/dev/null; then
   cat > "$T/img.swift" <<'S'
