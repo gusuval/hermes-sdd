@@ -242,7 +242,7 @@ git add -A; git commit -qm v1; git tag requirements-v1.0
 sed -i.bak '/enero de 2027/d' requirements/REQUIREMENTS.md; rm -f requirements/REQUIREMENTS.md.bak
 printf '# INT-002\n\n> quita el criterio de enero\n' > intent/INT-002.md
 o=$($TX puerta requisitos "$C" --proyecto sala --version 1.1 --cambio INT-002 | jq -r .texto)
-echo "$o" | grep -q '^➖ Antelación: se quita el criterio «GIVEN hoy WHEN reserva en enero de 2027 THEN no se crea»$' \
+echo "$o" | grep -q '^➖ Antelación: se quita el criterio «hoy; cuando reserva en enero de 2027 → no se crea»$' \
   && ok "cambio de criterios: la puerta dice cuál se quita (no «el detalle está en changes/»)" || bad "ajustes: $o"
 # … y si solo cambia cómo se verifica (sala, INT-005), también lo dice, en castellano
 git checkout -q requirements/REQUIREMENTS.md; printf -- '- **Verification:** test — sin versión fija\n' >> requirements/REQUIREMENTS.md
@@ -410,5 +410,153 @@ assert T.para_cliente(ej).startswith("¿El registro de seguridad")
 PYT
 d=""; for f in async-questions git-conventions handoff-protocol sdd-constitution; do cmp -s "$ROOT/metodo/references/$f.md" "$ROOT/docs/metodo/$f.md" || d="$d $f"; done
 [ -z "$d" ] && ok "docs/metodo/ y metodo/references/ dicen lo mismo" || bad "gemelos distintos:$d"
+
+# ── casos reales del taller (puertas g17946895473328 requisitos v1.0, g179469031011fd cambio INT-002, ruta; 14/11/2026) ──
+# «Esto dirá la web»: los textos exactos de las líneas «Se ve:» agrupados por pantalla, sin repetir, con un ejemplo del
+# propio criterio para las plantillas; en un cambio, solo los nuevos
+W="$T/taller"; mkdir -p "$W/requirements" "$W/intent" "$W/.sdd"; cd "$W"; git init -q; git config user.email t@t; git config user.name t
+cat > requirements/REQUIREMENTS.md <<'M'
+# Requirements
+### REQ-F-001: Apuntarse con plaza libre
+- **Para el cliente:** Escribes tu nombre y, si quedan plazas, quedas apuntada o apuntado al momento.
+- **Priority:** Must have
+- **Needs:** N-001
+- **Acceptance criteria:**
+  - GIVEN el taller tiene 2 plazas WHEN "Lucía" envía su nombre THEN the user sees "Tienes plaza en el taller, Lucía"
+    - Se ve: "Tienes plaza en el taller, {nombre}" en la pantalla de inscripción
+  - GIVEN "Lucía" apuntada WHEN "Pablo" envía su nombre THEN the user sees "Tienes plaza en el taller, Pablo"
+    - Se ve: "Tienes plaza en el taller, {nombre}" en la pantalla de inscripción
+  - GIVEN el nombre está vacío WHEN se envía THEN the user sees "Escribe tu nombre para apuntarte"
+    - Se ve: "Escribe tu nombre para apuntarte" en la pantalla de inscripción
+### REQ-F-005: Consultar
+- **Para el cliente:** Ves si tienes plaza.
+- **Priority:** Must have
+- **Needs:** N-002
+- **Acceptance criteria:**
+  - GIVEN "Marta" apuntada WHEN consulta THEN the user sees "Tienes plaza en el taller, Marta"
+    - Se ve: "Tienes plaza en el taller, {nombre}" en la pantalla de consulta
+### REQ-F-006: La organizadora ve apuntados
+- **Para el cliente:** La organizadora ve quién está apuntado.
+- **Priority:** Must have
+- **Needs:** N-003
+- **Acceptance criteria:**
+  - GIVEN 2 plazas y "Lucía" y "Pablo" WHEN abre su vista THEN the user sees "Apuntados: 2 de 2" y "Lista de espera: 0"
+    - Se ve: "Apuntados: {n} de {plazas}", "Lista de espera: {n}" en la vista de la organizadora
+### REQ-C-001: Stack del proyecto
+- **Para el cliente:** La web se construye con las herramientas ya elegidas.
+- **Verification:** test — package.json declara vite
+M
+git add -A; git commit -qm v1; git tag requirements-v1.0
+o=$($TX puerta requisitos "$W" --proyecto taller --version 1.0 | jq -r .texto)
+web=$(echo "$o" | sed -n '/^💬/,/^$/p')
+[ "$(echo "$web" | sed -n 2p)" = "En la pantalla de inscripción:" ] \
+  && echo "$web" | grep -qx '• «Tienes plaza en el taller, {nombre}» (p. ej. «Tienes plaza en el taller, Lucía»); también en la pantalla de consulta' \
+  && echo "$web" | grep -qx '• «Escribe tu nombre para apuntarte»' && echo "$web" | grep -qx 'En la vista de la organizadora:' \
+  && echo "$web" | grep -qx '• «Apuntados: {n} de {plazas}» (p. ej. «Apuntados: 2 de 2»)' \
+  && [ "$(echo "$web" | grep -c 'Tienes plaza')" = 1 ] && ! echo "$web" | grep -q 'En la pantalla de consulta' \
+  && ok "taller, requisitos: «Esto dirá la web» por pantalla, sin repetir, con el ejemplo del propio criterio" || bad "esto dirá la web: $o"
+python3 - "$ROOT/plugin/hermes-sdd" "$W" <<'PYT' && ok "«Esto dirá la web» corto: los 12 primeros y «… y N más»" || bad "web corto"
+import sys; sys.path.insert(0, sys.argv[1]); import hsdd_textos as T
+from pathlib import Path
+md = "### REQ-F-001: x\n- **Acceptance criteria:**\n" + "".join(
+    f'  - GIVEN a WHEN b THEN the user sees "Texto {i}"\n    - Se ve: "Texto {i}" en Inicio\n' for i in range(15))
+R = Path(sys.argv[2]); viejo = (R / "requirements/REQUIREMENTS.md").read_text()
+(R / "requirements/REQUIREMENTS.md").write_text(md)
+b = T._bloque_web(R, cambio=False)
+(R / "requirements/REQUIREMENTS.md").write_text(viejo)
+assert b.splitlines()[-1] == "… y 3 más (en requirements/REQUIREMENTS.md, líneas «Se ve:»)" and b.count("• «Texto") == 12, b
+assert "entre llaves" not in b, b
+PYT
+# el cambio INT-002, pedido por las respuestas de la puerta de requisitos: la petición en castellano (la frase «Para el
+# cliente» y la opción elegida), no «Q-requirements-engineer-003: How is the organiser…»; los criterios sin «THEN the
+# user sees»; la verificación técnica no sale si cambia la frase; y sin plan aún no promete «replanificar lo nuevo»
+cat > .sdd/questions-requirements-engineer.md <<'Q'
+## Q-requirements-engineer-003 [ANSWERED] skill=sdd-requirements-engineer context=REQ-F-006
+Question: How is the organiser distinguished from other people (no login mentioned)?
+Para el cliente: ¿La vista de la organizadora es una página aparte sin contraseña, o debe protegerse?
+Options:
+  A) Separate page without password (recommended: simplest)
+     efecto: req-change
+     cliente: Página aparte sin contraseña; no se deja bajar de las personas ya apuntadas
+  B) Shared password
+     efecto: req-change
+Answer: A — elegida por Andres Leon (Cliente) (2026-11-14)
+Q
+cat > intent/INT-002.md <<'I'
+# INT-002
+
+> En la puerta «Requisitos v1.0», Andres Leon (Cliente) eligió respuestas que piden cambiar los requisitos:
+>
+> Q-requirements-engineer-003: How is the organiser distinguished from other people (no login mentioned)?
+> Respuesta elegida: A) Separate page without password (recommended: simplest)
+I
+python3 - requirements/REQUIREMENTS.md <<'PYT'
+import sys; p = sys.argv[1]; t = open(p).read()
+t = t.replace("La organizadora ve quién está apuntado.", "La organizadora entra en una página aparte, sin contraseña, y ve quién está apuntado.")
+t = t.replace("package.json declara vite", "package.json declara vite y vitest")
+t = t.replace("La web se construye con las herramientas ya elegidas.", "La web se construye con las herramientas ya elegidas, más un pequeño servidor.")
+t = t.replace('    - Se ve: "Apuntados: {n} de {plazas}", "Lista de espera: {n}" en la vista de la organizadora\n',
+  '    - Se ve: "Apuntados: {n} de {plazas}", "Lista de espera: {n}" en la vista de la organizadora\n'
+  '  - GIVEN 3 plazas con "Lucía", "Pablo" y "Marta" WHEN la organizadora fija 2 plazas THEN the user sees "No puedes dejar menos plazas (2) que personas apuntadas (3)"\n'
+  '    - Se ve: "No puedes dejar menos plazas ({plazas}) que personas apuntadas ({n})" en la vista de la organizadora\n'
+  '  - GIVEN la web WHEN alguien abre /organizadora THEN the user sees la vista sin contraseña\n'
+  '    - Se ve: "Apuntados: {n} de {plazas}" en /organizadora; no visible en la pantalla de inscripción\n')
+open(p, "w").write(t)
+PYT
+o=$($TX puerta requisitos "$W" --proyecto taller --version 1.1 --cambio INT-002 | jq -r .texto)
+echo "$o" | grep -qx '✏️ Cambio que piden las respuestas que eligió Andres Leon (Cliente) en la puerta «Requisitos v1.0» de «taller»:' \
+  && echo "$o" | grep -qx '• ¿La vista de la organizadora es una página aparte sin contraseña, o debe protegerse? → A) Página aparte sin contraseña; no se deja bajar de las personas ya apuntadas' \
+  && ! echo "$o" | grep -qE 'How is|Q-requirements|Respuesta elegida|recommended' \
+  && ok "taller, cambio INT-002: la petición con la frase «Para el cliente» y la opción en castellano, sin la cita en inglés" || bad "petición por respuestas: $o"
+echo "$o" | grep -qx '✏️ La organizadora ve apuntados: ahora dice «La organizadora entra en una página aparte, sin contraseña, y ve quién está apuntado.»' \
+  && echo "$o" | grep -q '^➕ La organizadora ve apuntados: nuevo criterio «3 plazas con "Lucía", "Pablo" y "Marta"; cuando la organizadora fija 2 plazas → se ve "No puedes' \
+  && echo "$o" | grep -q '^✏️ Herramientas del proyecto: ahora dice' && ! echo "$o" | grep -qE 'THEN|GIVEN|the user sees|package.json|Stack|la frase para el cliente' \
+  && ok "taller, cambio INT-002: lo que cambia sin «THEN the user sees», sin «Stack» ni la verificación técnica" || bad "qué cambia: $o"
+web=$(echo "$o" | sed -n '/^💬/,/^$/p')
+[ "$(echo "$web" | grep -c '^•')" = 1 ] && echo "$web" | grep -qx '• «No puedes dejar menos plazas ({plazas}) que personas apuntadas ({n})» (p. ej. «No puedes dejar menos plazas (2) que personas apuntadas (3)»)' \
+  && echo "$web" | head -1 | grep -q '^💬 Textos nuevos o cambiados en la web' \
+  && ok "taller, cambio INT-002: solo los textos nuevos de la web (no repite los aprobados ni la ruta /organizadora)" || bad "textos del cambio: $o"
+echo "$o" | grep -q 'el plan por fases, que aún no está hecho, saldrá de ella' && ! echo "$o" | grep -q 'replanifica' \
+  && ok "taller, cambio sin plan todavía: no promete «solo se replanifica lo nuevo: las fases ya aceptadas no se tocan»" || bad "sin plan: $o"
+# … y las respuestas que lanzan el cambio llevan su versión para el cliente (por si .sdd/ ya no tuviera la pregunta)
+python3 - "$ROOT/plugin/hermes-sdd" "$W" <<'PYT' && ok "respuesta(): lleva «Para el cliente: … → A) …» y la puerta la usa sin la pregunta en .sdd/" || bad "respuesta para el cliente"
+import sys; sys.path.insert(0, sys.argv[1]); import hsdd_textos as T
+from pathlib import Path
+b = (Path(sys.argv[2]) / ".sdd/questions-requirements-engineer.md").read_text()
+r = T.respuesta(b, "A")
+assert r.splitlines()[1] == "Respuesta elegida: A) Separate page without password (recommended: simplest)", r
+assert r.splitlines()[2] == "Para el cliente: ¿La vista de la organizadora es una página aparte sin contraseña, o debe protegerse? → A) Página aparte sin contraseña; no se deja bajar de las personas ya apuntadas", r
+pet = "En la puerta «Requisitos v1.0», Ana (Cliente) eligió respuestas que piden cambiar los requisitos: " + " ".join(r.splitlines())
+out = T._peticion_por_respuestas(Path("/no/existe"), "taller", pet)
+assert out.splitlines()[1] == "• ¿La vista de la organizadora es una página aparte sin contraseña, o debe protegerse? → A) Página aparte sin contraseña; no se deja bajar de las personas ya apuntadas", out
+PYT
+# «👉 … esto lanzará» con las opciones marcadas (función pura que usan Telegram y el panel), con los efectos que guardó la
+# puerta real de requisitos del taller (Q3 y Q4 recomendadas abren un cambio)
+python3 - "$ROOT/plugin/hermes-sdd" <<'PYT' && ok "resumen_lanzara: recomendadas por defecto, y se recalcula con las Q marcadas" || bad "resumen_lanzara"
+import sys; sys.path.insert(0, sys.argv[1]); import hsdd_textos as T
+n, rc = {"efecto": "ninguno", "ficheros": [], "declarado": True}, {"efecto": "req-change", "ficheros": [], "declarado": True}
+p = {"preguntas": [{"n": 1, "recomendada": "A", "efectos": {"A": n, "B": rc}}, {"n": 2, "recomendada": "A", "efectos": {"A": n, "B": rc}},
+                   {"n": 3, "recomendada": "A", "efectos": {"A": rc, "B": rc}}, {"n": 4, "recomendada": "A", "efectos": {"A": rc, "B": n}}]}
+d = T.resumen_lanzara(p, {})
+assert d == "👉 Si firmas sin tocar los botones Q, esto lanzará: 📝 abre un cambio de requisitos (antes de seguir te llega su puerta): Q3, Q4 · sin más efecto: Q1, Q2.", d
+assert T.resumen_lanzara(p, {"1": "A", "2": "A", "3": "A", "4": "A"}) == d   # marcar lo recomendado no cambia nada
+m = T.resumen_lanzara(p, {"4": "B", "1": "B"})
+assert m == "👉 Con lo que has marcado en los botones Q, firmar lanzará: 📝 abre un cambio de requisitos (antes de seguir te llega su puerta): Q1, Q3 · sin más efecto: Q2, Q4.", m
+p["texto"] = "Requisitos\n\n" + d
+assert T.texto_con_lanzara(p, {"4": "B", "1": "B"}) == "Requisitos\n\n" + m
+assert T.texto_con_lanzara({**p, "texto": "Requisitos\n\n" + m}, {}) == "Requisitos\n\n" + d   # volver a lo recomendado
+assert T.resumen_lanzara({"preguntas": [{"n": 1, "recomendada": "A"}]}, {}) == ""   # puertas antiguas sin efectos: no se toca
+assert T.texto_con_lanzara({"texto": "x", "preguntas": [{"n": 1, "recomendada": "A"}]}, {"1": "B"}) == "x"
+PYT
+# ruta: «fases: compacta: una fase…» (dos puntos seguidos) y «huecos entre especificación y código» (jerga)
+cat > "$T/rutas2.json" <<'J'
+[{"verbo":"ruta-ligera","etiqueta":"⭐ Ligera","descripcion":"Solo lo esencial.","etapas":[],"hace":"","fijada":true,"fases":"Compacta: una fase y pocas tareas"},
+ {"verbo":"ruta-adaptativa","etiqueta":"🧭 Adaptativa","descripcion":"El método elige.","etapas":["gap-detector"],"hace":"x","fases":"Según el tamaño del proyecto"}]
+J
+o=$($TX puerta ruta "$W" --proyecto taller --opciones-ruta "$T/rutas2.json" | jq -r .texto)
+echo "$o" | grep -qx '⭐ Ligera (la fijaste al crear el proyecto): Solo lo esencial. → sin pasos extra; fases: una fase y pocas tareas.' \
+  && echo "$o" | grep -q '; fases: según el tamaño del proyecto\.$' \
+  && ! grep -qE '"(huecos entre|búsqueda de huecos)|diseño y huecos' "$ROOT/plugin/hermes-sdd/hsdd_proyectos.py" "$ROOT/plugin/hermes-sdd/hsdd_textos.py" \
+  && ok "taller, ruta: «fases: una fase y pocas tareas» (no «compacta: …») y sin «huecos»" || bad "ruta fases: $o"
 cd "$R"
 exit $fail

@@ -28,6 +28,10 @@ if "hsdd_proyectos" not in sys.modules:
     _spec = importlib.util.spec_from_file_location("hsdd_proyectos", Path(__file__).resolve().parent.parent / "hsdd_proyectos.py")
     _mod = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_mod); sys.modules["hsdd_proyectos"] = _mod
 PR = sys.modules["hsdd_proyectos"]
+if "hsdd_textos" not in sys.modules:
+    _spec = importlib.util.spec_from_file_location("hsdd_textos", Path(__file__).resolve().parent.parent / "hsdd_textos.py")
+    _mod = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_mod); sys.modules["hsdd_textos"] = _mod
+TX = sys.modules["hsdd_textos"]
 
 router = APIRouter()
 CAMPOS = ("id", "tipo", "fase", "tablero", "titulo", "texto", "opciones", "preguntas", "estado", "creada", "sha",
@@ -63,6 +67,8 @@ def _vista(p: dict, persona: str) -> dict:
     v = {k: p.get(k) for k in CAMPOS}
     v["paso"] = N.paso_actual(p)
     v["respuestas"] = N.respuestas(p)
+    # «👉 … esto lanzará» con lo marcado en los botones Q (la misma función que Telegram)
+    v["texto"] = TX.texto_con_lanzara(p, v["respuestas"])
     v["evidencias"] = N.evidencias(p)
     v["jev"] = p.get("jev")
     v["jev_linea"] = N.describir_jev(p)

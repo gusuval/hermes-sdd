@@ -17,7 +17,7 @@ ETAPAS = {
     "spec-auditor": "revisión de la especificación", "test-planner": "plan de pruebas aparte",
     "security-auditor": "revisión de seguridad", "ux-designer": "diseño visual y de uso",
     "tech-designer": "diseño técnico", "plan-architect": "plan por fases", "task-generator": "tareas",
-    "task-implementer": "programación", "acceptance": "comprobación final con demo", "gap-detector": "búsqueda de huecos",
+    "task-implementer": "programación", "acceptance": "comprobación final con demo", "gap-detector": "repaso de que el código hace todo lo especificado",
 }
 DUDAS = {
     "external_customer": "si la web es para un cliente que tiene que revisarla y darla por buena",
@@ -144,21 +144,123 @@ def _campos(texto: str) -> dict:
     return res
 
 
-def _ajustes(repo: Path) -> list[str]:
-    """Qué criterios cambian respecto a la última versión aprobada (tag requirements-v*), para la puerta de un cambio."""
+def _aprobado(repo: Path) -> str | None:
+    """REQUIREMENTS.md de la última versión aprobada (tag requirements-v*), o None si no hay ninguna."""
     import subprocess
     try:
         tags = subprocess.run(["git", "-C", str(repo), "tag", "-l", "requirements-v*", "--sort=-v:refname"],
                               capture_output=True, text=True, timeout=10).stdout.split()
         if not tags:
-            return []
-        antes = subprocess.run(["git", "-C", str(repo), "show", f"{tags[0]}:requirements/REQUIREMENTS.md"],
-                               capture_output=True, text=True, timeout=10).stdout
+            return None
+        return subprocess.run(["git", "-C", str(repo), "show", f"{tags[0]}:requirements/REQUIREMENTS.md"],
+                              capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _criterio_llano(c: str) -> str:
+    """Un criterio GIVEN/WHEN/THEN dicho en castellano: «situación; cuando …→ se ve …» (taller, INT-002: la puerta
+    enseñaba «THEN the user sees» a la clienta)."""
+    c = re.sub(r"^\s*GIVEN\s+", "", c)
+    c = re.sub(r"\s+WHEN\s+", "; cuando ", c)
+    c = re.sub(r"\s+THEN\s+the user sees\s+", " → se ve ", c)
+    c = re.sub(r"\s+THEN\s+", " → ", c)
+    return re.sub(r"\s+AND\s+", " y ", c)
+
+
+# ── «Esto dirá la web»: los textos exactos de las líneas «Se ve:» de los criterios REQ-F ────────────────────────────
+_SE_VE = re.compile(r"^\s+[-*]\s+Se ve\s*:\s*(.*)$")
+_COMILLAS = re.compile(r'"([^"]+)"')
+
+
+def _ejemplo(plantilla: str, criterio: str) -> str:
+    """Un texto citado en el propio criterio que encaja con la plantilla («Tienes plaza en el taller, {nombre}» →
+    «Tienes plaza en el taller, Lucía»), o ""."""
+    if "{" not in plantilla:
+        return ""
+    trozos = re.split(r"\{[^{}]*\}", plantilla)
+    patron = "(.+?)".join(re.escape(t) for t in trozos)
+    return next((q for q in _COMILLAS.findall(criterio) if re.fullmatch(patron, q)), "")
+
+
+def textos_web(texto: str) -> list[dict]:
+    """[{pantalla, texto, ejemplo}] de las líneas «Se ve:» de los criterios REQ-F, en orden y sin repetir
+    (`- Se ve: "a", "b" en <pantalla>; "c" en <otra>`)."""
+    out, vistos, tipo, criterio = [], set(), None, ""
+    for l in texto.replace("“", '"').replace("”", '"').splitlines():
+        m = re.match(r"^###\s+REQ-([A-Z]+)-", l)
+        if m:
+            tipo, criterio = m.group(1), ""
+            continue
+        if l.startswith("#"):
+            tipo = None
+        if tipo != "F":
+            continue
+        if re.match(r"^\s+[-*]\s+GIVEN\b", l):
+            criterio = l
+            continue
+        s = _SE_VE.match(l)
+        if not s:
+            continue
+        for trozo in s.group(1).split(";"):
+            citas = _COMILLAS.findall(trozo)
+            if not citas:
+                continue
+            donde = re.match(r"\s*,?\s*(?:en|in|on)\s+(.*\S)", trozo[trozo.rfind('"') + 1:])
+            pantalla = donde.group(1).rstrip(".") if donde else ""
+            for t in citas:
+                if (pantalla.lower(), t) not in vistos:
+                    vistos.add((pantalla.lower(), t))
+                    out.append({"pantalla": pantalla, "texto": t, "ejemplo": _ejemplo(t, criterio)})
+    # una pantalla dicha como ruta («/organizadora») que solo repite textos ya vistos en una pantalla con nombre sobra
+    con_nombre = {x["texto"] for x in out if not x["pantalla"].startswith("/")}
+    return [x for x in out if not (x["pantalla"].startswith("/") and x["texto"] in con_nombre)]
+
+
+def _bloque_web(repo: Path, cambio: bool, maximo: int = 12) -> str:
+    """«💬 Esto dirá la web», agrupado por pantalla; en un cambio, solo los textos nuevos o cambiados."""
+    textos = textos_web(_leer(repo / "requirements" / "REQUIREMENTS.md"))
+    if cambio:
+        antes = _aprobado(repo)
+        if antes is None:
+            return ""
+        viejos = {(x["pantalla"].lower(), x["texto"]) for x in textos_web(antes)}
+        textos = [x for x in textos if (x["pantalla"].lower(), x["texto"]) not in viejos]
+    # el mismo texto en otra pantalla no se repite: se dice «también en …» junto a la primera
+    unicos: dict = {}
+    for x in textos:
+        if x["texto"] in unicos:
+            if x["pantalla"] and x["pantalla"] not in unicos[x["texto"]]["tambien"]:
+                unicos[x["texto"]]["tambien"].append(x["pantalla"])
+        else:
+            unicos[x["texto"]] = {**x, "tambien": []}
+    textos = list(unicos.values())
+    if not textos:
+        return ""
+    grupos: dict = {}
+    for x in textos[:maximo]:
+        grupos.setdefault(x["pantalla"], []).append(x)
+    llaves = "; lo que va entre llaves cambia en cada caso" if any("{" in x["texto"] for x in textos[:maximo]) else ""
+    lineas = ["💬 " + ("Textos nuevos o cambiados en la web" if cambio else "Esto dirá la web")
+              + f" (lo que leerá la gente, tal cual{llaves}):"]
+    for pantalla, xs in grupos.items():
+        lineas.append(f"En {pantalla}:" if pantalla else "En pantalla:")
+        lineas += [f"• «{x['texto']}»" + (f" (p. ej. «{x['ejemplo']}»)" if x["ejemplo"] else "")
+                   + (f"; también en {' y en '.join(x['tambien'])}" if x["tambien"] else "") for x in xs]
+    if len(textos) > maximo:
+        lineas.append(f"… y {len(textos) - maximo} más (en requirements/REQUIREMENTS.md, líneas «Se ve:»)")
+    return "\n".join(lineas)
+
+
+def _ajustes(repo: Path) -> list[str]:
+    """Qué criterios cambian respecto a la última versión aprobada (tag requirements-v*), para la puerta de un cambio."""
+    antes = _aprobado(repo)
+    if antes is None:
         return []
     ahora = _leer(repo / "requirements" / "REQUIREMENTS.md")
     viejo, nuevo = _criterios(antes), _criterios(ahora)
-    nombres = {r["id"]: r["titulo"] or _texto_req(r) for r in requisitos(repo)}
+    # «Stack del proyecto» (título habitual de la condición de herramientas) dicho sin jerga
+    nombres = {r["id"]: re.sub(r"^Stack\b", "Herramientas", r["titulo"]) or _texto_req(r) for r in requisitos(repo)}
     out = []
     # Otras líneas del requisito que cambian (cómo se verifica, prioridad, la frase para el cliente…): sala, INT-005,
     # solo cambiaba la verificación de REQ-C-001 y la puerta decía «el detalle está en changes/»
@@ -170,11 +272,18 @@ def _ajustes(repo: Path) -> list[str]:
         if a.get("Statement") and b.get("Statement") and a["Statement"] != b["Statement"] \
                 and a.get("Para el cliente") == b.get("Para el cliente"):
             out.append(f"✏️ {nombres.get(rid, rid)}: cambia lo que exige el requisito; ahora dice «{_corta(b['Statement'], 240)}»")
+        cliente_cambia = a.get("Para el cliente") != b.get("Para el cliente")
         for k, v in campos.items():
             # solo lo que la persona lee: el resto (Statement en inglés, Source, Dependencies…) es interno del método
             if k.lower() not in ("para el cliente", "verification", "priority"):
                 continue
             if rid in cv and k in cv[rid] and cv[rid][k] != v:
+                if k.lower() == "para el cliente":   # la frase nueva, entera (taller, INT-002: «…no se d…»)
+                    out.append(f"✏️ {nombres.get(rid, rid)}: ahora dice «{_corta(v, 320)}»")
+                    continue
+                # cómo se comprueba es técnico («package.json declara vite…»): solo si es lo único que cambia
+                if k.lower() == "verification" and cliente_cambia:
+                    continue
                 k = _NOMBRE_CAMPO.get(k.lower(), k)
                 v = _corta(re.sub(r"^(test|demo|inspection|analysis)\s+—\s+", "", v), 180)
                 out.append(f"✏️ {nombres.get(rid, rid)}: {k} pasa a «{v}»")
@@ -189,10 +298,10 @@ def _ajustes(repo: Path) -> list[str]:
         for c in list(quitados):
             par = max(puestos, key=lambda x: _parecido(c, x), default=None)
             if par is not None and _parecido(c, par) >= 0.6:
-                out.append(f"✏️ {nombres.get(rid, rid)}: en el criterio «{_corta(c, 120)}» {_cambio_palabras(c, par)}")
+                out.append(f"✏️ {nombres.get(rid, rid)}: en el criterio «{_corta(_criterio_llano(c), 120)}» {_cambio_palabras(c, par)}")
                 quitados.remove(c); puestos.remove(par)
-        out += [f"➖ {nombres.get(rid, rid)}: se quita el criterio «{_corta(c, 180)}»" for c in quitados]
-        out += [f"➕ {nombres.get(rid, rid)}: nuevo criterio «{_corta(c, 180)}»" for c in puestos]
+        out += [f"➖ {nombres.get(rid, rid)}: se quita el criterio «{_corta(_criterio_llano(c), 180)}»" for c in quitados]
+        out += [f"➕ {nombres.get(rid, rid)}: nuevo criterio «{_corta(_criterio_llano(c), 180)}»" for c in puestos]
     return out[:8] + ([f"… y {len(out) - 8} cambios más (el detalle está en requirements/REQUIREMENTS.md)"] if len(out) > 8 else [])
 
 
@@ -241,10 +350,12 @@ def puerta_requisitos(repo: Path, proyecto: str, version: str = "", cambio: dict
         titulo = f"Requisitos (cambio {cambio['id']})"
         pet = cambio["peticion"]
         # De dónde viene: el mantenimiento, unas respuestas elegidas en otra puerta o la persona (/cambio)
-        origen = ("Cambio que pide el mantenimiento de" if pet.startswith("Mantenimiento detectado")
-                  else "Cambio que piden las respuestas de una puerta de" if "eligió respuestas que piden cambiar los requisitos" in pet
-                  else "Cambio que pediste para")
-        partes.append(f"✏️ {origen} «{proyecto}»:\n«{_corta(pet, 400)}»")
+        por_respuestas = _peticion_por_respuestas(repo, proyecto, pet)
+        if por_respuestas:
+            partes.append(por_respuestas)
+        else:
+            origen = "Cambio que pide el mantenimiento de" if pet.startswith("Mantenimiento detectado") else "Cambio que pediste para"
+            partes.append(f"✏️ {origen} «{proyecto}»:\n«{_corta(pet, 400)}»")
         nuevos = [r for r in reqs if r["id"] in cambio.get("anadidos", [])]
         quitados = cambio.get("quitados", [])
         if nuevos or quitados:
@@ -257,8 +368,15 @@ def puerta_requisitos(repo: Path, proyecto: str, version: str = "", cambio: dict
             aj = _ajustes(repo)
             partes.append(f"Qué cambia{v}: los mismos requisitos, con ajustes" +
                           (":\n" + "\n".join(aj) if aj else " (el detalle está en changes/)."))
+        web = _bloque_web(repo, cambio=True)
+        if web:
+            partes.append(web)
         if (repo / ".sdd" / "hermes" / "mantenimiento" / "en-curso.txt").exists():
             partes.append("Si lo apruebas, el mantenimiento sigue con esta versión (no se replanifica nada).")
+        elif not list((repo / "plan" / "fases").glob("FASE-*.md")):
+            # sin plan todavía no hay fases que replanificar ni aceptadas (taller, INT-002: lo prometía antes del plan)
+            partes.append("Si lo apruebas, el proyecto sigue con esta versión: el plan por fases, que aún no está hecho, "
+                          "saldrá de ella.")
         elif nuevos or quitados:
             partes.append("Si lo apruebas, solo se replanifica lo nuevo: las fases ya aceptadas no se tocan.")
         else:
@@ -285,7 +403,38 @@ def puerta_requisitos(repo: Path, proyecto: str, version: str = "", cambio: dict
     if condiciones:
         partes.append(f"🔧 Condiciones del proyecto ({len(condiciones)}):\n"
                       + "\n".join(f"• {_texto_req(r)}" for r in condiciones))
+    web = _bloque_web(repo, cambio=False)
+    if web:
+        partes.append(web)
     return {"titulo": titulo, "texto": "\n\n".join(partes) + _cierre_requisitos(extras)}
+
+
+def _peticion_por_respuestas(repo: Path, proyecto: str, pet: str) -> str:
+    """La petición de un cambio que lanzaron unas respuestas (firmar.sh: «En la puerta «X», Ana eligió respuestas que
+    piden cambiar los requisitos: Q-…: Question… Respuesta elegida: A) …»), dicha con la frase «Para el cliente» de
+    cada pregunta y su opción en castellano (taller, INT-002: la puerta citaba «How is the organiser…» en inglés).
+    "" si la petición no viene de unas respuestas."""
+    m = re.match(r"\s*En la puerta «(.*?)», (.*?) eligió respuestas que piden cambiar los requisitos:\s*(.*)$", pet, re.S)
+    if not m:
+        return ""
+    puerta, quien, resto = m.groups()
+    bloques = bloques_preguntas(list(repo.glob(".sdd/questions-*.md")))
+    lineas = []
+    for qid, pregunta, letra, opcion in re.findall(
+            r"(Q-[\w-]+-\d{3}):\s*(.*?)\s*Respuesta elegida:\s*([A-Z])\)\s*(.*?)(?=\s*(?:Q-[\w-]+-\d{3}:|Para el cliente:|$))",
+            resto, re.S):
+        b = bloques.get(qid, "")
+        cli = para_cliente(b) if b else ""
+        op = (efecto(b, letra).get("cliente") or "") if b else ""
+        if not cli:   # sin la pregunta en .sdd/, la versión para el cliente que dejó el notario en la petición, si la hay
+            d = re.search(re.escape(qid) + r".*?Para el cliente:\s*(.*?)\s*→\s*[A-Z]\)\s*(.*?)(?=\s*(?:Q-[\w-]+-\d{3}:|$))", resto, re.S)
+            cli, op = (d.group(1), d.group(2)) if d else (pregunta, op)
+        op = op or re.sub(r"\s*\((?:recommended|recomendada)\b[^)]*\)", "", opcion)
+        lineas.append(f"• {_corta(cli, 220)} → {letra}) {_corta(op, 200)}")
+    if not lineas:
+        return ""
+    return (f"✏️ Cambio que piden las respuestas que eligió {quien} en la puerta «{puerta}» de «{proyecto}»:\n"
+            + "\n".join(lineas))
 
 
 def _cierre_requisitos(extras: list) -> str:
@@ -315,7 +464,9 @@ def puerta_ruta(repo: Path, proyecto: str, opciones: list | None = None) -> dict
             extra = "pasos extra: " + o["hace"] if o.get("etapas") else "sin pasos extra"
             marca = (" (recomendada: es un cambio sobre lo ya entregado; las especificaciones y diseños ya existen)" if o.get("tras_entrega")
                      else " (la fijaste al crear el proyecto)" if o.get("fijada") else (" (recomendada)" if o.get("recomendada") else ""))
-            fases = f"; fases: {o['fases'][0].lower() + o['fases'][1:]}" if o.get("fases") else ""
+            # «Compacta: una fase y pocas tareas» → «fases: una fase y pocas tareas» (no «fases: compacta: …»)
+            f = re.sub(r"^[^:]{1,20}:\s*", "", o.get("fases") or "")
+            fases = f"; fases: {f[0].lower() + f[1:]}" if f else ""
             lineas.append(f"{o['etiqueta']}{marca}: {o['descripcion']} → {extra}{fases}.")
         partes.append("\n".join(lineas))
         partes.append("👉 Pulsa la ruta que quieras · ❌ Rechazar si ninguna te vale (y cuéntame por qué).")
@@ -755,8 +906,10 @@ def respuesta(bloque: str, letra: str) -> str:
         return ""
     q = re.search(r"^Question:\s*(.*)$", bloque, re.M)
     qid = bloque.split()[1] if len(bloque.split()) > 1 else "?"
+    cli, op = para_cliente(bloque), efecto(bloque, letra).get("cliente") or _MARCA_CAMBIO.sub("", txt).strip()
+    # con la versión para el cliente al final: la puerta del cambio que lancen estas respuestas la enseña en castellano
     return (f"{qid}: {q.group(1).strip() if q else ''}\nRespuesta elegida: {letra.upper()}) "
-            f"{_MARCA_CAMBIO.sub('', txt).strip()}")
+            f"{_MARCA_CAMBIO.sub('', txt).strip()}" + (f"\nPara el cliente: {cli} → {letra.upper()}) {op}".rstrip() if cli else ""))
 
 
 def peticion_cambio(bloque: str, letra: str) -> str:
@@ -933,12 +1086,63 @@ def _efecto_txt(e: dict) -> str:
     return {"accion": "🛠 lanza trabajo", "req-change": "📝 abre un cambio de requisitos", "?": "❔ efecto desconocido"}.get(e.get("efecto"), "")
 
 
+LANZARA_DEFECTO = "👉 Si firmas sin tocar los botones Q, esto lanzará: "
+LANZARA_MARCADO = "👉 Con lo que has marcado en los botones Q, firmar lanzará: "
+
+
+def _lanzara(elegidas: list[tuple[int, dict]], marcado: bool = False) -> str:
+    """La línea «👉 … esto lanzará: …» de [(n, efecto de la opción elegida)]."""
+    lanza = {"accion": [], "req-change": [], "ninguno": [], "?": []}
+    tests_aut = []
+    for n, e in elegidas:
+        ef = e.get("efecto") or "ninguno"
+        if ef == "editar-test":
+            tests_aut += [f"{x} (Q{n})" for x in e.get("ficheros") or []] or [f"tests sin decir cuáles (Q{n})"]
+        else:
+            lanza.setdefault(ef, []).append(f"Q{n}")
+    partes = [f"🛠 lanza trabajo: {', '.join(lanza['accion'])}" if lanza["accion"] else "",
+              (f"📝 abre un cambio de requisitos (antes de seguir te llega su puerta): {', '.join(lanza['req-change'])}"
+               if lanza["req-change"] else ""),
+              f"✏️ autoriza editar tests que ya existían: {', '.join(tests_aut)}" if tests_aut else "",
+              f"❔ efecto desconocido: {', '.join(lanza['?'])}" if lanza["?"] else "",
+              f"sin más efecto: {', '.join(lanza['ninguno'])}" if lanza["ninguno"] else ""]
+    return (LANZARA_MARCADO if marcado else LANZARA_DEFECTO) + " · ".join(x for x in partes if x) + "."
+
+
+def resumen_lanzara(puerta: dict, elecciones: dict) -> str:
+    """Qué lanzará firmar la puerta con las opciones marcadas en los botones Q ({n: letra}; la que falte, la
+    recomendada), con los efectos que la puerta guardó de cada opción. "" si la puerta no tiene preguntas con efectos.
+    Función pura: la usan Telegram y el panel para reescribir esa línea al pulsar un botón Q."""
+    qs = [q for q in puerta.get("preguntas") or [] if q.get("efectos")]
+    if not qs:
+        return ""
+    elecciones = {str(k): v for k, v in (elecciones or {}).items() if v}
+    elegidas, marcado = [], False
+    for q in sorted(qs, key=lambda q: int(q["n"])):
+        rec = q.get("recomendada") or ""
+        letra = elecciones.get(str(q["n"])) or rec
+        marcado = marcado or letra != rec
+        e = (q.get("efectos") or {}).get(letra)
+        if e:
+            elegidas.append((int(q["n"]), e))
+    return _lanzara(elegidas, marcado) if elegidas else ""
+
+
+def texto_con_lanzara(puerta: dict, elecciones: dict) -> str:
+    """El texto de la puerta con la línea «esto lanzará» recalculada para las opciones marcadas."""
+    texto = puerta.get("texto") or ""
+    nueva = resumen_lanzara(puerta, elecciones)
+    if not nueva:
+        return texto
+    return re.sub(r"^(?:" + re.escape(LANZARA_DEFECTO) + "|" + re.escape(LANZARA_MARCADO) + r").*$",
+                  lambda _: nueva, texto, count=1, flags=re.M)
+
+
 def preguntas(ficheros: list[Path]) -> str:
     """Las preguntas abiertas, numeradas como los botones Q1, Q2…, con la recomendada marcada. Cada una con su frase
     «Para el cliente» delante y lo técnico plegado en una línea; cada opción dice qué lanza (su efecto); al final, qué
     lanzará firmar sin tocar nada (club: un plan firmó 21 recomendadas de golpe sin ver que tres lanzaban trabajo)."""
-    bloques, lanza = [], {"accion": [], "req-change": [], "editar-test": [], "ninguno": []}
-    tests_aut = []
+    bloques, recomendadas = [], []
     for f in sorted(ficheros):
         for b in re.findall(r"^## Q-[^\n]*\[OPEN\].*?(?=^## |\Z)", _leer(f), flags=re.M | re.S):
             n = len(bloques) + 1   # mismo número que el botón Q (puerta.sh cuenta todas las abiertas)
@@ -952,20 +1156,14 @@ def preguntas(ficheros: list[Path]) -> str:
                 lineas.append(f"   {letra}) {e.get('cliente') or _MARCA_CAMBIO.sub('', txt).strip()}{'  ⭐ recomendada' if rec else ''}"
                               + (f"  ({marca})" if marca else ""))
                 if rec:
-                    lanza.setdefault(e["efecto"], []).append(f"Q{n}")
-                    if e["efecto"] == "editar-test":
-                        tests_aut += [f"{x} (Q{n})" for x in e.get("ficheros") or []]
+                    recomendadas.append((n, e))
             errs = errores_pregunta(b)
             if errs:
                 lineas.append("   ⚠️ Pregunta mal escrita: " + "; ".join(errs))
             bloques.append("\n".join(lineas))
     if not bloques:
         return ""
-    partes = [f"🛠 lanza trabajo: {', '.join(lanza['accion'])}" if lanza["accion"] else "",
-              f"📝 abre un cambio de requisitos: {', '.join(lanza['req-change'])}" if lanza["req-change"] else "",
-              f"✏️ autoriza editar tests que ya existían: {', '.join(tests_aut)}" if tests_aut else "",
-              f"sin más efecto: {', '.join(lanza['ninguno'])}" if lanza["ninguno"] else ""]
-    resumen = "👉 Si firmas sin tocar los botones Q, esto lanzará: " + " · ".join(x for x in partes if x) + "."
+    resumen = _lanzara(recomendadas)
     return ("\n\n❓ Antes, " + ("una pregunta" if len(bloques) == 1 else f"{len(bloques)} preguntas")
             + " (la recomendada ya está marcada en los botones Q):\n\n" + "\n\n".join(bloques) + "\n\n" + resumen)
 
