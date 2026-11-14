@@ -25,5 +25,5 @@ tags=$(git -C "$R" tag -l 'requirements-v*' 'fase-*-accepted' 'entrega-*' | tr '
 [ "$(echo $tags | wc -w | tr -d ' ')" = 6 ] && ok "tags: $tags" || bad "tags: $tags"
 ajenas=$(jq -r 'select(.by != "Alumna" and .by != "command") | "\(.type) por \(.by)"' "$R/acceptance/decisions.jsonl" | sort -u | tr '\n' ' ')
 [ -z "$ajenas" ] && ok "las decisiones registradas son de quien practica (ninguna heredada de la grabación)" || bad "decisiones ajenas: $ajenas"
-(cd "$R" && node "$ROOT/metodo/scripts/sdd.mjs" gate >/dev/null 2>&1) && ok "gate global en verde" || bad "gate global no se cumple"
+if g=$(cd "$R" && node "$ROOT/metodo/scripts/sdd.mjs" gate 2>&1); then ok "gate global en verde"; else bad "gate global no se cumple: $(echo "$g" | grep -vE '^\s*$' | grep -iE 'fail|missing|✗|❌|not|error' | head -8 | tr '\n' ' ')"; fi
 exit $fail
