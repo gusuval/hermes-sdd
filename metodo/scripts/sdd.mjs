@@ -151,12 +151,17 @@
 //   sdd accept challenge list [--open] [--fase N] [--json]
 //       Challenges with their state: open · stale (a cited file changed since the challenge's HEAD, or the requirement
 //       text changed) · dismissed (a challenge-dismissal record). JSON: counts, must_open, challenges[].
-//   sdd accept adversarial plan [--fase N] [--json]
+//   sdd accept adversarial plan [--fase N] [--since PLAN.json|SHA] [--json]
 //       Mechanical coverage critic for the adversarial round: per FASE, requirements with their literal statement and
-//       criteria, the tests bound to each criterion (with file), captures and candidate files (files under code_paths
-//       of the commits whose Task: is TASK-F{N}-…); plus uncovered (active requirements in no FASE's Requisitos:),
-//       fases_without_header, criteria_without_test and coverage_gaps. Challenges never change a verdict: the ledger
-//       lists them in requirements[].challenges[] and summary.must_challenged.
+//       criteria, the tests bound to each criterion (with file), captures (with capture_sha256) and candidate files
+//       (files under code_paths of the commits whose Task: is TASK-F{N}-…); plus uncovered (active requirements in no
+//       FASE's Requisitos:), fases_without_header, criteria_without_test and coverage_gaps. Challenges never change a
+//       verdict: the ledger lists them in requirements[].challenges[] and summary.must_challenged.
+//       --since (incremental round): the previous round's plan JSON (or a commit) → each criterion gets recheck and
+//       recheck_reasons: its text, a test block citing it or shared code of its test file, a helper its test imports,
+//       code its requirement's commits own, its capture's sha256, its bound tests or verdict changed, or it has an open
+//       challenge (or one open at the baseline). A changed config or code no commit attributes to the FASE re-checks
+//       every criterion; *.md and the method's folders never count. incremental: {since, criteria, recheck, carried}.
 //   sdd gate [--mode off|warn|enforce] [--fase N] [--ledger FILE] [--md] [--json] [accept options]
 //       Exit 0 goal met (every Must VERIFIED or WAIVED) · 1 not met · 2 stale evidence or usage · 3 met with waived
 //       Musts · 4 met, but a Must (not waived) has an open adversarial challenge and the Stack Profile says

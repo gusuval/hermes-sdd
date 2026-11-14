@@ -189,6 +189,24 @@ quote and evidence, commit it, and route:
 After the fixes are committed, run `--adversarial --fase N` again: the challenges whose cited code changed are
 `stale`, and the new round confirms whether each finding still holds.
 
+## 7b. Incremental round
+
+The first round of each FASE reads every criterion. A later round of the same FASE (the one after the fix pass, or a
+re-acceptance after a rejection) may read only what moved since the previous round, whose plan JSON was kept:
+
+```bash
+node "$SDD" accept adversarial plan --fase N --since .sdd/hermes/adversarial-FASE-N.json --json
+```
+
+Each criterion gets `recheck` and `recheck_reasons`: its requirement text changed, a test block that cites it (or
+shared code of its test file, or a helper that file imports) changed, code its requirement's commits own changed, the
+sha256 of its capture changed, its bound tests or its verdict changed, or it has an open challenge (or one that was
+open at the previous round). What cannot be pinned to a criterion (a test config, code no commit attributes to the
+FASE) re-checks every criterion. Send only the `recheck: true` criteria to the verifiers of §3 and §3b and take the
+clean sample of §4 among them; the others keep their previous adversarial verdict (nothing in their evidence changed
+and nobody challenged them), so §5 does not report them as a gap. `incremental` in the plan counts `criteria`,
+`recheck` and `carried`. With nothing to re-check there is no round to run.
+
 ## 8. Gate
 
 `adversarial_gate` in the Stack Profile decides what an open challenge on a Must does to `sdd gate`: `off` ignores
