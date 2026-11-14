@@ -183,6 +183,25 @@ def _ejemplo(plantilla: str, criterio: str) -> str:
     return next((q for q in _COMILLAS.findall(criterio) if re.fullmatch(patron, q)), "")
 
 
+def _sin_parentesis(linea: str) -> str:
+    """La línea «Se ve:» sin sus aclaraciones entre paréntesis fuera de comillas: lo que va dentro explica, no se ve
+    (taller: «… en la vista de la organizadora (la pantalla no muestra…; "Marta" se apunta…)» daba una pantalla rota y
+    «Marta» como texto de la web). Los paréntesis dentro de un texto citado («… ({plazas})») se conservan."""
+    out, dentro, nivel = [], False, 0
+    for c in linea:
+        if c == '"' and nivel == 0:
+            dentro = not dentro
+        elif not dentro and c == "(":
+            nivel += 1
+            continue
+        elif not dentro and c == ")" and nivel:
+            nivel -= 1
+            continue
+        if nivel == 0:
+            out.append(c)
+    return re.sub(r"\s+", " ", "".join(out)).strip()
+
+
 def textos_web(texto: str) -> list[dict]:
     """[{pantalla, texto, ejemplo}] de las líneas «Se ve:» de los criterios REQ-F, en orden y sin repetir
     (`- Se ve: "a", "b" en <pantalla>; "c" en <otra>`)."""
@@ -202,7 +221,7 @@ def textos_web(texto: str) -> list[dict]:
         s = _SE_VE.match(l)
         if not s:
             continue
-        for trozo in s.group(1).split(";"):
+        for trozo in _sin_parentesis(s.group(1)).split(";"):
             citas = _COMILLAS.findall(trozo)
             if not citas:
                 continue
@@ -298,7 +317,13 @@ def _ajustes(repo: Path) -> list[str]:
         for c in list(quitados):
             par = max(puestos, key=lambda x: _parecido(c, x), default=None)
             if par is not None and _parecido(c, par) >= 0.6:
-                out.append(f"✏️ {nombres.get(rid, rid)}: en el criterio «{_corta(_criterio_llano(c), 120)}» {_cambio_palabras(c, par)}")
+                # Un solo retoque se dice por palabras («x» pasa a «y»); varios, con la frase entera antes y después
+                # (taller, INT-003: «se añade «de 2 plazas,»; «1» pasa a «una persona nueva…»; se quita «libre»» no se entendía)
+                if _n_cambios(c, par) == 1:
+                    out.append(f"✏️ {nombres.get(rid, rid)}: en el criterio «{_corta(_criterio_llano(c), 120)}» {_cambio_palabras(c, par)}")
+                else:
+                    out.append(f"✏️ {nombres.get(rid, rid)}: un criterio cambia. Antes: «{_corta(_criterio_llano(c), 200)}» "
+                               f"→ ahora: «{_corta(_criterio_llano(par), 200)}»")
                 quitados.remove(c); puestos.remove(par)
         out += [f"➖ {nombres.get(rid, rid)}: se quita el criterio «{_corta(_criterio_llano(c), 180)}»" for c in quitados]
         out += [f"➕ {nombres.get(rid, rid)}: nuevo criterio «{_corta(_criterio_llano(c), 180)}»" for c in puestos]
@@ -308,6 +333,11 @@ def _ajustes(repo: Path) -> list[str]:
 def _parecido(a: str, b: str) -> float:
     import difflib
     return difflib.SequenceMatcher(None, a.split(), b.split()).ratio()
+
+
+def _n_cambios(a: str, b: str) -> int:
+    import difflib
+    return sum(1 for op, *_ in difflib.SequenceMatcher(None, a.split(), b.split()).get_opcodes() if op != "equal")
 
 
 def _cambio_palabras(a: str, b: str) -> str:

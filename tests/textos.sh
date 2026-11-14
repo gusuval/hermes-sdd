@@ -578,4 +578,20 @@ sed -i.bak 's/ (recomendado)//' "$f"; rm -f "$f.bak"
 o=$(python3 -c "import sys; sys.path.insert(0, '$ROOT/plugin/hermes-sdd'); import hsdd_textos as T; from pathlib import Path; print(T.preguntas([Path('$f')]))")
 echo "$o" | grep -q "A) .*⭐ recomendada" && ! echo "$o" | grep -q "esto lanzará: \.$" \
   && ok "sin marca, la primera es la recomendada (como los botones Q)" || bad "sin marca: $o"
+# «Se ve:» con una aclaración entre paréntesis (que cita otros textos): ni pantalla rota ni «Marta» como texto de la web;
+# y un criterio con varios retoques se enseña entero antes y después, no como una lista de palabras (taller, INT-003)
+python3 - "$ROOT/plugin/hermes-sdd" <<'PY' && ok "«Se ve» sin aclaraciones entre paréntesis; criterio con varios retoques, entero" || bad "paréntesis / varios retoques"
+import sys; sys.path.insert(0, sys.argv[1]); import hsdd_textos as T
+t = """### REQ-F-004: x
+  - GIVEN a WHEN b THEN c
+    - Se ve: "Apuntados: 1 de 2" en la vista de la organizadora (no hay texto de plazas libres; "Marta" recibe "Tienes plaza, Marta")
+    - Se ve: "No puedes dejar menos plazas ({plazas}) que personas apuntadas ({n})" en la vista de la organizadora
+"""
+w = T.textos_web(t)
+assert [(x["pantalla"], x["texto"]) for x in w] == [("la vista de la organizadora", "Apuntados: 1 de 2"),
+    ("la vista de la organizadora", "No puedes dejar menos plazas ({plazas}) que personas apuntadas ({n})")], w
+a = "GIVEN 2 plazas WHEN Pablo se da de baja THEN hay 1 persona apuntada y 1 plaza libre"
+b = "GIVEN 2 plazas WHEN Pablo se da de baja THEN hay 1 persona apuntada de 2 plazas, y una persona nueva recibe plaza"
+assert T._n_cambios(a, b) > 1 and T._n_cambios(a, a.replace("libre", "vacía")) == 1
+PY
 exit $fail
