@@ -168,10 +168,41 @@ function normPriority(v) {
   return v ? v.trim() : null;
 }
 
+// The «Se ve» contract: nested lines under a criterion saying what its THEN puts on screen, so the test, its capture
+// and the acceptance checks compare the same texts:
+//     - Se ve: "Te has apuntado a Iniciación" en Clases        one or more quoted texts (exact), then where (free text)
+//     - Se ve: "Hola, {usuario}" en la cabecera                   a template: {…} is a variable, only its form is fixed
+//     - No visible: lo prueba el CSV descargado                   explicitly nothing on screen, with the reason
+// English labels too: `Shows:` / `Sees:` / `Not visible:`.
+export const SEES_LINE = /^\s{3,}[-*]\s+(Se ve|Se ven|Shows|Sees|No visible|Not visible)\s*:\s*(.*)$/i;
+const SEE_QUOTES = /«([^»]*)»|“([^”]*)”|"([^"]*)"/g;
+/** One `Se ve:` / `No visible:` line → { texts: [{ text, template }], where, none }. */
+export function parseSees(label, rest) {
+  if (/^no/i.test(label)) return { texts: [], where: null, none: rest.trim() || "—" };
+  // where: from the first ` en | on | in | at ` outside quotes (the place may be quoted: en «Clases»)
+  const masked = rest.replace(SEE_QUOTES, (m) => " ".repeat(m.length));
+  const at = masked.search(/\s(?:en|on|in|at)\s/i);
+  const head = at < 0 ? rest : rest.slice(0, at);
+  const texts = [...head.matchAll(SEE_QUOTES)].map((m) => (m[1] ?? m[2] ?? m[3]).trim()).filter(Boolean)
+    .map((t) => ({ text: t, template: /\{[^{}]+\}/.test(t) }));
+  return { texts, where: at < 0 ? null : rest.slice(at).trim().replace(/^(?:en|on|in|at)\s+/i, "") || null, none: null };
+}
+function addSees(cur, m) {
+  const i = cur.criteria.length - 1;
+  const p = parseSees(m[1], m[2]);
+  const prev = cur.sees[i] || { texts: [], where: null, none: null };
+  cur.sees[i] = { texts: [...prev.texts, ...p.texts], where: prev.where || p.where, none: prev.none || p.none };
+}
+/** The fixed parts of a template («Hola, {usuario}» → ["Hola,"]): what a test carries verbatim. */
+export function templateParts(t) {
+  return String(t).split(/\{[^{}]+\}/).map((x) => x.trim()).filter((x) => /[\p{L}\p{N}]/u.test(x));
+}
+
 // Returns one object per `### REQ-…` block: {id, type (F|NF|C|other), title, statement, criteria[], priority
 // (Must|Should|Nice|raw|null), needs (array of N-ids, [] for "—", null when the field is absent), verification
 // (one of VERIFICATION_METHODS, the raw text when unknown, null when absent), deprecated, examplesReviewedBy, plain (the
-// `- **Para el cliente:**` line: one or two plain sentences the customer reviews; null when absent)}.
+// `- **Para el cliente:**` line: one or two plain sentences the customer reviews; null when absent), sees (aligned
+// with criteria: the criterion's `Se ve:` / `No visible:` lines as parseSees gives them, undefined without them)}.
 export function parseRequirements(text) {
   const reqs = [];
   let cur = null;
@@ -180,13 +211,16 @@ export function parseRequirements(text) {
     if (h) {
       const type = (h[1].match(/^REQ-(F|NF|C)-\d+$/) || [])[1] || "other";
       cur = { id: h[1], type, title: h[2].trim(), statement: "", criteria: [], priority: null, needs: null,
-        verification: null, deprecated: /\[deprecated\]|\(deprecated\)|\[obsoleto\]|^~~/i.test(h[2]), examplesReviewedBy: null, plain: null };
+        verification: null, deprecated: /\[deprecated\]|\(deprecated\)|\[obsoleto\]|^~~/i.test(h[2]), examplesReviewedBy: null, plain: null,
+        sees: [] };
       reqs.push(cur); continue;
     }
     if (!cur) continue;
     if (/^#{1,3}\s/.test(line)) { cur = null; continue; }
     const g = line.match(/^\s{2,}[-*]\s+(GIVEN|DADO|Given|Dado)\b(.+)$/);
     if (g) { cur.criteria.push((g[1] + g[2]).trim()); continue; }
+    const sv = line.match(SEES_LINE);
+    if (sv && cur.criteria.length) { addSees(cur, sv); continue; }
     const f = line.match(FIELD);
     if (!f) continue;
     const key = REQ_FIELDS[f[1].trim().toLowerCase()];
@@ -239,6 +273,38 @@ export function parseNeeds(text) {
 // shown at the gate. Deprecated requirements are ignored. REQ-C may carry `Needs: —` (team/architecture source).
 // opts.plain: also warn (`no-plain`) for each active requirement without its `- **Para el cliente:**` line, the plain
 // explanation the status page shows (`sdd lint --needs` asks for it).
+// A text that speaks to the user (second person, a greeting) depends on who reads it: «Ya estás apuntada» was right for
+// "lucia" and wrong for "pablo" (club, FASE-8). Such a text needs two criteria with different data showing it.
+const TO_USER = /(?<![\p{L}\p{N}])(te|tu|tus|ti|contigo|has|estás|estas|tienes|eres|hola|bienvenid[oa]s?|you|your|you're|welcome|hello|hi)(?![\p{L}\p{N}])/iu;
+const givenData = (c) => {
+  const at = c.search(/\b(?:THEN|ENTONCES)\b/);
+  const before = at < 0 ? c : c.slice(0, at);
+  return [...before.matchAll(SEE_QUOTES)].map((m) => (m[1] ?? m[2] ?? m[3]).trim().toLowerCase()).sort().join("|");
+};
+/** Warnings of the «Se ve» contract for REQ-F: a criterion without `Se ve:` nor `No visible:` (no-sees), and a text
+ *  addressed to the user shown by a single example (one-actor). */
+export function checkSees(active) {
+  const w = [];
+  for (const r of active.filter((x) => x.type === "F")) {
+    const sees = r.sees || [];
+    const without = r.criteria.map((_, i) => i).filter((i) => !sees[i]).map((i) => `AC${i + 1}`);
+    if (without.length)
+      w.push({ code: "no-sees", id: r.id, msg: `${r.id} ${without.join(", ")}: no '- Se ve: "…" en <pantalla>' nor "- No visible: <motivo>" line under the criterion (what the capture must show)` });
+    const byText = new Map();
+    sees.forEach((s, i) => {
+      for (const t of s?.texts || []) {
+        if (!TO_USER.test(t.text)) continue;
+        const k = t.text.toLowerCase();
+        if (!byText.has(k)) byText.set(k, { text: t.text, acs: [], data: new Set() });
+        const e = byText.get(k); e.acs.push(`AC${i + 1}`); e.data.add(givenData(r.criteria[i]));
+      }
+    });
+    for (const e of byText.values()) if (e.data.size < 2)
+      w.push({ code: "one-actor", id: r.id, msg: `${r.id} ${e.acs.join(", ")}: "${e.text}" speaks to the user and only one example shows it; add a criterion where another actor (other data) sees it, so the text does not depend on who reads it` });
+  }
+  return w;
+}
+
 export function checkNeedCoverage(needs, reqs, reqText = "", opts = {}) {
   const errors = [], warnings = [];
   const byId = new Map(needs.map((n) => [n.id, n]));
@@ -281,6 +347,7 @@ export function checkNeedCoverage(needs, reqs, reqText = "", opts = {}) {
     warnings.push({ code: "examples-not-reviewed", id: r.id, msg: `${r.id} has no "Examples reviewed by:" (nor a document-level one)` });
   if (opts.plain) for (const r of active) if (!r.plain)
     warnings.push({ code: "no-plain", id: r.id, msg: `${r.id} has no "- **Para el cliente:**" line (one or two plain sentences the customer reviews; the status page shows it)` });
+  if (opts.plain) warnings.push(...checkSees(active));
   const must = fnf.filter((r) => r.priority === "Must").length;
   const mustRatio = fnf.length ? Math.round((must / fnf.length) * 100) / 100 : 0;
   const mustConfirmed = /^>?\s*\*\*(Must list confirmed by|Lista Must confirmada por)\s*:?\*\*\s*:?\s*\S/im.test(reqText);

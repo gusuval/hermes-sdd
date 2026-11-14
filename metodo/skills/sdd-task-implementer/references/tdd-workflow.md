@@ -351,13 +351,13 @@ test.describe('E2E-WF-001: User Registration Flow', () => {
     // Step 5: Assert what the customer reads, then capture it
     // REQ-F-001 AC1: "…THEN the user sees the greeting 'Welcome, test@example.com'"
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Welcome, test@example.com');
-    await captureCriterion(page, testInfo, 'AC-001-01');
+    await captura(page, testInfo, 'AC-001-01', { ve: ['Welcome, test@example.com'] }); // Se ve: "Welcome, {email}"
 
     // Step 6: Assert final state
     // REQ-F-001 AC2: "…and lands on the dashboard with the section 'Your projects'"
     await expect(page).toHaveURL(/\/dashboard/);
     await expect(page.getByRole('region', { name: 'Your projects' })).toContainText('Your projects');
-    await captureCriterion(page, testInfo, 'AC-001-02');
+    await captura(page, testInfo, 'AC-001-02', { ve: ['Your projects'] });
   });
 
   test('E2E-WF-001-02 AC-001-03 duplicate email', async ({ page }, testInfo) => {
@@ -368,7 +368,7 @@ test.describe('E2E-WF-001: User Registration Flow', () => {
 
     // REQ-F-001 AC3: "…THEN the user sees 'This email is already in use'"
     await expect(page.getByRole('alert')).toHaveText('This email is already in use');
-    await captureCriterion(page, testInfo, 'AC-001-03');
+    await captura(page, testInfo, 'AC-001-03', { ve: ['This email is already in use'] });
   });
 });
 ```
@@ -416,7 +416,8 @@ export class LoginPage {
 - All assertions use locator-based `expect(locator)`, never `expect(await page.textContent(...))`
 - A criterion's THEN is asserted on its text (`toHaveText`/`toContainText` with the literal it quotes);
   `toBeVisible()` alone proves an element exists, not what the customer reads
-- Every criterion of a REQ-F gets its capture right after its assert (`captureCriterion`), and the suite records one
+- Every criterion of a REQ-F gets its capture right after its assert (`captura(page, testInfo, id, { ve })` with the
+  texts of its `Se ve:` line, in the test whose title cites it, never right after a check by API), and the suite records one
   video per test (config and helper: `references/construction-protocol.md`); without the image the acceptance ledger
   reads the criterion as `unshown` and the requirement cannot be VERIFIED
 - Wait for stable state before interacting (no arbitrary `page.waitForTimeout()`)

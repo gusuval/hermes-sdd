@@ -48,6 +48,8 @@ For EACH requirement, evaluate:
 ### 1.6 Examples and Verification
 
 - [ ] **Concrete examples**: each acceptance criterion uses real data (values, names, exact messages, exit codes), not placeholders such as "some items" or "an error"
+- [ ] **What is seen**: each REQ-F criterion has `- Se ve: "<exact text>" en <pantalla>` (texts with `{variable}` are templates) or `- No visible: <motivo>` under it; a THEN without a literal ("the system refuses") gets the text that tells the user so (`no-sees` of `sdd lint --needs`)
+- [ ] **Second actor**: a text addressed to the user (second person, greeting, agreement with the reader) is shown by two criteria with different actors and data (`one-actor`)
 - [ ] **Examples reviewed**: `Examples reviewed by:` names who on the customer side agreed with them, per requirement or once in the header
 - [ ] **Verification method fits**: `Verification:` is `test` for behaviour, `demo` for UI look and flow, `measurement` for an NFR with a threshold (metric, threshold and how it is measured stated on the line), `test` for constraints code can check (dependency lists, import boundaries, runtime versions; tests named `REQ-C-NNN AC1 …`), `inspection` only for process, legal and organisational constraints or what no test can observe
 - [ ] **Measurable NFR**: a `measurement` requirement names a threshold that a recorded value can be compared with
