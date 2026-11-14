@@ -22,21 +22,49 @@ Path: `$STATE_ROOT/.sdd/questions-<role>.md` (e.g. `.sdd/questions-impl-f1a.md`)
 
 ```markdown
 ## Q-<role>-NNN [OPEN] skill=<skill-name> context=<stage / task / finding / file:line>
-Question: <the exact decision needed, one or two lines>
+Question: <the exact decision needed, one or two lines; technical detail goes here>
+Para el cliente: <the same decision for the customer, in plain words: no ids, no code, no article numbers>
 Options:
   A) <option> (recommended)
+     efecto: <ninguno | accion | req-change | editar-test FILE...>
+     cliente: <optional: the option in plain words>
   B) <option>
-  C) <option>
+     efecto: <...>
 Blocks: <tasks, artifacts or gate that stay blocked until answered>
+Answer:
+```
+
+Example (an implementer that would need to touch a test accepted in an earlier FASE, Art. 12):
+
+```markdown
+## Q-task-implementer-031 [OPEN] skill=sdd-task-implementer context=TASK-F7-004
+Question: REQ-F-024 AC2 only logs `E_ZONA_SOLO_JUNTA`; logging `E_NO_AUTORIZADO` too breaks AC-001-08 in tests/integration/accesos.test.js (FASE-1, accepted).
+Para el cliente: ¿El registro de seguridad apunta también los intentos de entrar en zonas que no son de la junta?
+Options:
+  A) Log every denied zone and adapt the accepted test (recommended)
+     efecto: editar-test tests/integration/accesos.test.js
+     cliente: Sí, todos los intentos; se adapta la prueba que ya lo comprobaba
+  B) Keep logging only the board's zones
+     efecto: ninguno
+  C) Amend REQ-F-024 AC2 so the criterion says which zones count
+     efecto: req-change
+Blocks: TASK-F7-004
 Answer:
 ```
 
 - `NNN`: three digits, `max(NNN present in the file, including [ANSWERED]) + 1`; `001` for a new file.
 - `skill`: the skill writing the question. `context`: where it comes from (`TASK-F1-004`, `Step 4.5 AUD-017`, `spec/adr/ADR-025.md:45`).
 - `Options`: letters, at least two, exactly one `(recommended)`. A PAUSE's `Question:` / `Options:` lines are copied verbatim.
-- `(req-change)` after an option that, once chosen, changes `requirements/` (add, amend or deprecate a requirement or one of its criteria). The harness turns the chosen one into a requirements change with its own human gate; no stage applies it by itself. Example: `A) Add four REQs for RN-001..006 (req-change) (recommended)`.
+- `Para el cliente:` mandatory. The gate shows it first and folds the `Question:` into one technical line: the person decides on this sentence.
+- `efecto:` mandatory under every option: what choosing it sets in motion. The gate shows it before signing ("Esto lanzará: …") and the harness acts on it, never on the wording of the option:
+  - `ninguno`: nothing (keep it as it is, ratify what was done).
+  - `accion`: work for the stage that applies answers (adjust code, the plan, a capture…).
+  - `req-change`: changes `requirements/` (add, amend or deprecate a requirement or one of its criteria). The harness turns it into a requirements change with its own human gate; no stage applies it by itself.
+  - `editar-test FILE...`: edit tests (or their helpers, fixtures or run configuration) that already existed when a FASE was accepted, Art. 12. List every file, relative to the repository. Only a person can choose it (never Jev); when a person does, the notary records a `test-edit` decision in `acceptance/decisions.jsonl` with exactly those files, and that record is the only thing that authorizes editing them, until the next acceptance. An answered question, an `Answer:` line or an `Autoriza:` line in a commit authorize nothing.
+- `cliente:` optional under an option: the option in plain words, shown instead of the option text.
+- Questions written before `efecto:` existed are still read: their effect is guessed from the wording (`(req-change)` or a change verb next to REQ/criterion → req-change; "keep / leave / no…" → ninguno; anything else → accion) and they never authorize editing a test.
 - `Blocks`: what the station skips until the answer arrives (`TASK-F1-004, TASK-F1-007`, `pipeline gate`, `INV-023`).
-- `Answer:` empty. Only the lead writes it (Section 5).
+- `Answer:` empty. Only the lead (in the harness, the notary when a person signs the gate) writes it (Section 5); a stage never writes an answer or `[ANSWERED]` (the executor guard denies it).
 - Optional, written by the station after applying the answer: `Applied: <ISO-8601> <one line>`.
 
 ## 3. What each skill does while the question is open

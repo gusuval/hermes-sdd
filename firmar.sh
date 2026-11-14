@@ -96,14 +96,23 @@ if [ "$VERBO" = eximo ]; then
   EXIMO=true; VERBO=acepto
 fi
 
+# Respuestas a las preguntas que enseñó la puerta («Q1: A, Q2: B», lo añade el canal): se validan contra lo que la
+# persona vio ANTES de firmar nada. Una letra que no es opción, una pregunta que no existe o dos letras para la misma
+# rechazan la decisión con su motivo (antes «Q1: D» se ignoraba en silencio y «De Q1 a Q3…» se leía como Q1 = A). Y
+# una opción que autoriza editar tests que ya existían (efecto: editar-test) solo la puede elegir una persona.
+TEXTOS="$ROOT/plugin/hermes-sdd/hsdd_textos.py"
+QFILES=(); for f in .sdd/questions-*.md; do [ -f "$f" ] && QFILES+=("$f"); done
+respuestas() { python3 "$TEXTOS" respuestas "$1" --puerta "$PUERTA" --texto "$TEXTO" --verbo "$VERBO" "${@:2}" ${QFILES[@]+"${QFILES[@]}"}; }
+if ! jq -e '.pasos | index("validado")' "$HOME_SDD/actas/${BOARD:-local}/$GATE.json" >/dev/null 2>&1 &&
+   ! ERR=$(respuestas validar --persona "$([ "$CANAL" = jev ] && echo 0 || echo 1)" 2>&1); then
+  echo "NOTARIO: rechazado — las respuestas no valen: $(printf '%s' "$ERR" | paste -sd';' - | sed 's/;/; /g')" >&2; exit 1
+fi
+
 # Aprobar requisitos o plan eligiendo en alguna pregunta una opción distinta de la recomendada: el texto que la
 # persona vio está escrito con la recomendada, así que firmarlo dejaría aprobado algo distinto de lo que eligió.
 # Se convierte en una petición de cambios con esas respuestas: la etapa rehace el texto y la puerta vuelve a abrirse.
 if { [ "$TIPO:$VERBO" = requisitos:acepto ] || [ "$TIPO:$VERBO" = plan:conforme ]; } && [ -n "$TEXTO" ]; then
-  DISTINTAS=$(jq -r --arg t "$TEXTO" '
-    ([$t | scan("[Qq][A-Za-z]?\\s*(\\d+)\\W{0,3}\\s*([A-Ca-c])\\b")] | map({key: .[0], value: (.[1] | ascii_upcase)}) | from_entries) as $e
-    | [.preguntas[]? | ($e[(.n | tostring)] // null) as $x | select($x != null and $x != .recomendada) | "\(.id) = \($x)"]
-    | join("; ")' "$PUERTA")
+  DISTINTAS=$(respuestas distintas)
   if [ -n "$DISTINTAS" ]; then
     VERBO=cambios
     TEXTO="$TEXTO. Respuestas distintas de la recomendada ($DISTINTAS): reescribe lo afectado según esas respuestas (están en .sdd/questions-*.md)."
@@ -282,15 +291,13 @@ commit_si_hay() {  # commit_si_hay <mensaje> <rutas...> — solo las que existen
 }
 
 # ── 2a. preguntas abiertas (clase C) que la puerta mostró ────────────────────────────────────────────────────────
-# «Q1: A, Q2: B» en el texto → esas letras; aceptar o dar conformidad sin texto → la opción recomendada.
+# «Q1: A, Q2: B» en el texto → esas letras; aceptar, dar conformidad o responder sin ellas → la opción recomendada.
+# Lo que lanza cada respuesta sale del efecto que declara su opción (efecto: ninguno | accion | req-change |
+# editar-test <ficheros>); solo las preguntas antiguas, sin efecto, se leen con las reglas de siempre.
 if ! hecho preguntas; then
-  MODO=""
-  if printf '%s' "$TEXTO" | grep -qiE 'q[a-z]?[[:space:]]*[0-9]'; then MODO=elegidas
-  elif [ "$VERBO" = acepto ] || [ "$VERBO" = conforme ] || [ "$VERBO" = respondo ]; then MODO=recomendada; fi
-  # Respuestas que piden cambiar los requisitos (p. ej. «Añadir cuatro REQ con sdd-req-change»): al aprobar un plan,
-  # una FASE o la entrega, se apuntan aquí y el paso 3 lanza el cambio en vez del tramo siguiente
-  # … y, al aceptar una FASE o la entrega, las que piden otra cosa (ajustar un test, editar el plan): las aplica la
-  # etapa «respuestas» antes del tramo siguiente
+  # Respuestas que piden cambiar los requisitos (req-change): al aprobar un plan, una FASE o la entrega, se apuntan
+  # aquí y el paso 3 lanza el cambio en vez del tramo siguiente; las que piden trabajo (accion, editar-test), al aceptar
+  # una FASE o la entrega, las aplica la etapa «respuestas» antes del tramo siguiente
   PIDEN=""; ACCIONES=""
   # (también al pedir cambios al plan o rechazar una FASE: lo pedido queda en feedback/ y se aplica tras el cambio, al
   # replanificar o al rehacer la FASE; antes esas respuestas se guardaban y el cambio no se lanzaba nunca)
@@ -298,55 +305,35 @@ if ! hecho preguntas; then
     PIDEN=".sdd/hermes/cambio-por-respuestas-$GATE.txt" ;; esac
   case "$TIPO:$VERBO" in fase:acepto|fase:observaciones|entrega:acepto|entrega:observaciones)
     ACCIONES=".sdd/hermes/respuestas-por-aplicar-$GATE.txt" ;; esac
-  if [ -n "$MODO" ]; then
-    python3 - "$ROOT/plugin/hermes-sdd/hsdd_textos.py" "$MODO" "$NOMBRE ($ROL)" "$HOY" "$TEXTO" "$PIDEN" "$ACCIONES" .sdd/questions-*.md <<'PY'
-import importlib.util, re, sys
-spec = importlib.util.spec_from_file_location("hsdd_textos", sys.argv[1]); X = importlib.util.module_from_spec(spec); spec.loader.exec_module(X)
-modo, quien, hoy, texto, piden, acciones, *ficheros = sys.argv[2:]
-peticiones, por_aplicar = [], []
-elegidas = {int(n): l.upper() for n, l in re.findall(r"[Qq][A-Za-z]?\s*(\d+)\W{0,3}\s*([A-Ca-c])\b", texto)}
-n = 0
-for p in sorted(ficheros):
-    try:
-        t = open(p, encoding="utf-8").read()
-    except OSError:
-        continue
-    def contestar(m):
-        global n
-        n += 1
-        b = m.group(0)
-        if modo == "elegidas":
-            if n not in elegidas:
-                return b
-            letra, como = elegidas[n], "elegida por"
-        else:
-            rec = X.opciones_json(b)["recomendada"]
-            letra, como = (rec or "?"), "opción recomendada, aceptada por"
-        if piden and letra != "?":
-            pet = X.peticion_cambio(b, letra)
-            if pet:
-                peticiones.append(pet)
-        if acciones and letra != "?":
-            acc = X.accion_respuesta(b, letra)
-            if acc:
-                por_aplicar.append(acc)
-        b = b.replace("[OPEN]", "[ANSWERED]", 1)
-        linea = f"Answer: {letra} — {como} {quien} ({hoy})"
-        if re.search(r"^Answer:[ \t]*$", b, re.M):   # [ \t]: no comerse los saltos de línea que separan preguntas
-            return re.sub(r"^Answer:[ \t]*$", linea, b, count=1, flags=re.M)
-        cuerpo = b.rstrip("\n")                       # sin línea Answer: se añade, conservando la separación
-        return cuerpo + "\n" + linea + b[len(cuerpo):] if b[len(cuerpo):] else cuerpo + "\n" + linea + "\n"
-    t = re.sub(r"^## Q-[^\n]*\[OPEN\].*?(?=^## |\Z)", contestar, t, flags=re.M | re.S)
-    open(p, "w", encoding="utf-8").write(t)
-if peticiones:
-    with open(piden, "w", encoding="utf-8") as f:
-        f.write("\n\n".join(peticiones) + "\n")
-if por_aplicar:
-    with open(acciones, "w", encoding="utf-8") as f:
-        f.write("\n\n".join(por_aplicar) + "\n")
-PY
-  fi
+  mkdir -p .sdd/hermes
+  RJ=".sdd/hermes/respuestas-$GATE.json"
+  respuestas aplicar --quien "$NOMBRE ($ROL)" --hoy "$HOY" --salida "$RJ" >/dev/null || fallo "no se pudieron escribir las respuestas"
+  if [ -n "$PIDEN" ] && [ "$(jq '.peticiones | length' "$RJ")" -gt 0 ]; then jq -r '.peticiones | join("\n\n")' "$RJ" > "$PIDEN"; fi
+  if [ -n "$ACCIONES" ] && [ "$(jq '.por_aplicar | length' "$RJ")" -gt 0 ]; then jq -r '.por_aplicar | join("\n\n")' "$RJ" > "$ACCIONES"; fi
   marcar preguntas
+fi
+# ── 2b. tests que la persona autoriza editar (art. 12) ──────────────────────────────────────────────────────────────
+# La única autorización que vale para editar un test que ya existía: una respuesta de una persona cuya opción declara
+# «efecto: editar-test <ficheros>». El notario la registra en acceptance/decisions.jsonl (test-edit: los ficheros, la
+# pregunta, la puerta, quién) y en su acta, fuera del alcance de las etapas. hsdd_fidelidad solo cree eso: una línea
+# «Answer: … elegida por Ana» en .sdd/questions-*.md (que una etapa puede escribir) ya no autoriza nada.
+if ! hecho autorizado; then
+  RJ=".sdd/hermes/respuestas-$GATE.json"
+  if [ -s "$RJ" ] && [ "$(jq '.autorizaciones | length' "$RJ" 2>/dev/null || echo 0)" -gt 0 ]; then
+    [ "$CANAL" != jev ] || fallo "editar un test que ya existía lo autoriza una persona, no Jev (art. 12)"
+    while IFS= read -r A; do
+      QID=$(jq -r .pregunta <<< "$A")
+      jq -e --arg g "$GATE" --arg q "$QID" 'select(.type == "test-edit" and .gate == $g and .question == $q)' acceptance/decisions.jsonl >/dev/null 2>&1 && continue
+      FICH=(); while IFS= read -r f; do FICH+=("$f"); done < <(jq -r '.ficheros[]' <<< "$A")
+      node "$SDD" accept record test-edit --paths "${FICH[@]}" --question "$QID" --gate "$GATE" \
+        --reason "$(jq -r .motivo <<< "$A")" --by "$NOMBRE" --role "$ROL" >/dev/null || fallo "no se pudo registrar la autorización de $QID"
+    done < <(jq -c '.autorizaciones[]' "$RJ")
+    t=$(mktemp); jq --slurpfile r "$RJ" '.autorizaciones = [$r[0].autorizaciones[] | {pregunta, ficheros}]' "$ACTA" > "$t" && mv "$t" "$ACTA"
+    git add acceptance/decisions.jsonl
+    git diff --cached --quiet || git commit -q -m "docs(acceptance): test edit authorized by $NOMBRE" \
+      --trailer "Refs: $(jq -r '[.autorizaciones[].pregunta] | join(", ")' "$RJ")" --trailer "Gate-Id: $GATE"
+  fi
+  marcar autorizado
 fi
 
 # ── 2. aplicar según el tipo de puerta ────────────────────────────────────────────────────────────────────────────
@@ -471,25 +458,7 @@ Kanban-Task: $BOARD/$TASK"
     mkdir -p .sdd/hermes/feedback
     {
       printf '%s\n' "$TEXTO"
-      python3 - "$TEXTO" "$PUERTA" .sdd/questions-*.md <<'PY' 2>/dev/null || true
-import json, re, sys
-texto, puerta, *ficheros = sys.argv[1:]
-elegidas = {int(n): l.upper() for n, l in re.findall(r"[Qq][A-Za-z]?\s*(\d+)\W{0,3}\s*([A-Ca-c])\b", texto)}
-qs = {q["n"]: q["id"] for q in (json.load(open(puerta)).get("preguntas") or [])}
-bloques = {}
-for f in ficheros:
-    try:
-        t = open(f).read()
-    except OSError:
-        continue
-    for m in re.finditer(r"^## (Q-\S+)[^\n]*\n(.*?)(?=^## |\Z)", t, re.M | re.S):
-        bloques[m.group(1)] = m.group(2)
-for n, letra in sorted(elegidas.items()):
-    b = bloques.get(qs.get(n, ""), "")
-    preg = re.search(r"^Question:\s*(.*)$", b, re.M)
-    op = re.search(rf"^\s+{letra}\)\s*(.*?)(?:\s*\(recommended\))?$", b, re.M)
-    print(f"Q{n} ({qs.get(n, '?')}): {preg.group(1) if preg else ''} → elegida {letra}: {op.group(1) if op else '?'}")
-PY
+      respuestas lineas 2>/dev/null || true
       node "$SDD" accept --fase "$FASE" --json 2>/dev/null | jq -r '
         (.scope.requirements // []) as $s
         | [.requirements[] | select(.verdict != "VERIFIED" and (($s | length) == 0 or (.id as $i | $s | index($i))))

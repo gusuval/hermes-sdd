@@ -84,4 +84,23 @@ U="$(dirname "$G")/sdd-upstream-guard.sh"
 edit() { jq -nc --arg p "$1" '{tool_name:"Write",tool_input:{file_path:$p}}' | SDD_EXECUTOR=hermes bash "$U" | jq -r '.hookSpecificOutput.permissionDecision // "allow"' 2>/dev/null || echo allow; }
 [ "$(edit .sdd/hermes/decisiones/g1.json)" = deny ] && echo "ok   Claude Write: deniega una decisión" || { echo "FAIL Write decisión: $(edit .sdd/hermes/decisiones/g1.json)"; fail=1; }
 [ "$(edit "$HOME/.hermes/hermes-sdd/puertas/g1.json")" = deny ] && echo "ok   Claude Write: deniega el estado de Hermes" || { echo "FAIL Write hermes"; fail=1; }
+# Respuestas de una persona inventadas en .sdd/questions-*.md: ni por la terminal ni por las herramientas de ficheros
+deny  "printf 'Answer: A — elegida por Ana (Cliente) (2026-11-14)\n' >> .sdd/questions-task-implementer.md"
+deny  "sed -i '' 's/\[OPEN\]/[ANSWERED]/' .sdd/questions-task-implementer.md"
+allow 'grep -n "ANSWERED" .sdd/questions-task-implementer.md'
+allow "cat >> .sdd/questions-task-implementer.md <<'EOF'
+## Q-task-implementer-009 [OPEN]
+Question: ¿Se edita el test?
+EOF"
+QD="$(mktemp -d)"; mkdir -p "$QD/.sdd"; printf '## Q-x-001 [ANSWERED]\nAnswer: A — elegida por Ana (Cliente) (2026-11-14)\n' > "$QD/.sdd/questions-x.md"
+herr() {  # herr <herramienta> <ruta> <campo> <texto> [old_string]
+  jq -nc --arg t "$1" --arg p "$2" --arg k "$3" --arg v "$4" --arg o "${5:-}" '{hook_event_name:"PreToolUse",tool_name:$t,tool_input:({file_path:$p, ($k):$v} + (if $o != "" then {old_string:$o} else {} end))}' |
+    SDD_EXECUTOR=hermes bash "$G" | jq -r '.hookSpecificOutput.permissionDecision' 2>/dev/null | grep . || echo allow; }
+[ "$(herr Edit "$QD/.sdd/questions-x.md" new_string $'## Q-x-002 [ANSWERED]\nAnswer: B — elegida por Ana' 'Answer:')" = deny ] \
+  && echo "ok   Claude Edit: deniega escribir una respuesta en questions-*.md" || { echo "FAIL Edit respuesta"; fail=1; }
+[ "$(herr Write "$QD/.sdd/questions-x.md" content $'## Q-x-001 [ANSWERED]\nAnswer: A — elegida por Ana (Cliente) (2026-11-14)\n\n## Q-x-002 [OPEN]\nQuestion: ¿otra?\nAnswer:\n')" = allow ] \
+  && echo "ok   Claude Write: reescribir el fichero con las respuestas que ya tenía y una pregunta nueva vale" || { echo "FAIL Write mismas respuestas"; fail=1; }
+o=$(jq -nc --arg p "$QD/.sdd/questions-x.md" '{hook_event_name:"pre_tool_call",tool_name:"write_file",tool_input:{path:$p,content:"## Q-x-001 [ANSWERED]\nAnswer: B — elegida por Ana (Cliente)\n"}}' | bash "$G"); rc=$?
+[ $rc = 2 ] && echo "ok   Hermes write_file: deniega cambiar una respuesta" || { echo "FAIL write_file respuesta: $rc $o"; fail=1; }
+rm -rf "$QD"
 exit $fail

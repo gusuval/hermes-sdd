@@ -69,7 +69,7 @@ sec '➕ Lo añade el método' | grep -q 'Un menú arriba' && sec '➕ Lo añade
 sec '🔧 Condiciones' | grep -q 'no necesita servidor' && ok "requisitos: las condiciones del proyecto, aparte" || bad "condiciones: $(sec '🔧')"
 ! echo "$o" | grep -q 'ya no vale' && ok "requisitos: no enseña los requisitos retirados" || bad "retirado aparece"
 echo "$o" | grep -q '⭐ recomendada' && echo "$o" | grep -q '^1. ¿Qué foto ponemos de portada?$' && ok "preguntas: numeradas como los botones y con la recomendada marcada" || bad "preguntas: $o"
-echo "$o" | grep -q '^   A) el integrado  ⭐ recomendada$' && echo "$o" | grep -q '^   C) dejarlo$' && ok "preguntas: opciones en una línea con [A] [B] [C], la recomendada marcada" || bad "corchetes: $o"
+echo "$o" | grep -q '^   A) el integrado  ⭐ recomendada  (🛠 lanza trabajo)$' && echo "$o" | grep -q '^   C) dejarlo$' && ok "preguntas: opciones en una línea con [A] [B] [C], la recomendada marcada" || bad "corchetes: $o"
 echo "$o" | grep -q '^   B) Sí, y añadirlo como criterio  (📝 abre un cambio de requisitos)$' && ok "preguntas: la opción que pide cambiar requisitos lo avisa (sin la marca del método)" || bad "req-change: $o"
 echo "$o" | grep -q '^   A) No, un clic  ⭐ recomendada$' && ok "preguntas: «A★)» también es la recomendada (y la A no se pierde)" || bad "estrella: $o"
 echo "$o" | grep -qE "$JERGA" && bad "requisitos con jerga: $(echo "$o" | grep -E "$JERGA")" || ok "requisitos: sin jerga del método"
@@ -304,5 +304,111 @@ import sys; sys.path.insert(0, sys.argv[1]); import hsdd_textos as T
 assert T._SIN_ACCION.match("Ratificar ambas ediciones tal cual") and T._SIN_ACCION.match("Ratify both edits")
 assert not T._SIN_ACCION.match("Revertirlas: el test del catálogo queda en rojo")
 PYT
+
+# ── casos reales del club (puertas de ~/.hermes/hermes-sdd/puertas, 14/11/2026) ─────────────────────────────────────
+K="$T/club"; mkdir -p "$K/requirements" "$K/.sdd/hermes"; cd "$K"
+printf '### REQ-NF-002: Tono cercano en los textos\n- **Para el cliente:** La web suena como habláis en el club: cercana, sin lenguaje de ventanilla.\n- **Priority:** Should have\n- **Needs:** N-015\n- **Verification:** inspection — una persona del club lee los textos\n' > requirements/REQUIREMENTS.md
+# entrega g17946730262624: 29 líneas ✅ iguales y «⚠️ Tono cercano: sin comprobar todavía (0 de 2)» justo encima de
+# «🔍 … lo compruebas tú» con el mismo requisito
+{ for x in "Entrada con usuario y contraseña" "Contraseña de al menos 10 caracteres" "Alta de socios" "Cuota mensual de 30 €" \
+    "El administrador marca quién ha pagado" "Socio moroso el día 5" "El moroso no puede reservar" "Reservar una pista" \
+    "Máximo 2 reservas activas" "Cancelar una reserva" "Una reserva de tarde" "Clases semanales" "Los socios se apuntan" \
+    "Pista con clase" "Torneo de 8 parejas" "El torneo ocupa las pistas" "Resultados del torneo" "CSV de pagos" "Botón Salir" \
+    "La sesión caduca" "Cambiar la contraseña" "Cinco fallos seguidos" "La junta da de baja" "Registro de seguridad" \
+    "Plazo de conservación" "Tratamiento de tú" "Todos los textos en español" "Stack JavaScript" "Un servidor del club"; do
+    printf '| REQ-F-0%02d %s | Must | test | VERIFIED | 4/4 | x |\n' $((n=${n:-0}+1)) "$x"; done
+  printf '| REQ-NF-002 Tono cercano en los textos | Should | inspection | MISSING | 0/2 | x |\n'; } > "$T/entrega.md"
+echo '{"revisar":[{"id":"REQ-NF-002","titulo":"Tono cercano en los textos","cliente":"La web suena como habláis en el club","como":"inspection"}],"solo":false}' > "$T/rev.json"
+o=$($TX puerta entrega "$K" --proyecto club --gate-md "$T/entrega.md" --rc 0 --revisar "$T/rev.json" | jq -r .texto)
+echo "$o" | grep -q '^✅ 29 requisitos funcionan y están comprobados: Entrada con usuario' && [ "$(echo "$o" | grep -c '^✅')" = 2 ] \
+  && ok "club, entrega: los 29 ✅ en una línea y solo las excepciones una a una" || bad "agrupar: $o"
+echo "$o" | grep -q '^🔍 Tono cercano en los textos: lo compruebas tú' && ! echo "$o" | grep -q '⚠️ Tono cercano' \
+  && ok "club, entrega: lo que revisa la persona sale con 🔍, no como «⚠️ sin comprobar todavía»" || bad "tono: $o"
+# FASE-5 g1794643938d0fc: «Solo puedes rechazarla» con el botón «🟡 Aceptar sin lo que falta» debajo
+o=$($TX puerta fase "$K" --proyecto club --fase 5 --rc 1 | jq -r .texto)
+! echo "$o" | grep -qi 'solo puedes rechazarla' && echo "$o" | grep -q 'acéptala sin ello' && echo "$o" | grep -q '🟡 Aceptar sin lo que falta' \
+  && ok "club, FASE-5 bloqueada: el texto no dice «solo puedes rechazarla» si hay 🟡 Aceptar sin lo que falta" || bad "contradicción: $o"
+# FASE-7 g1794652544f502: «⚠️ Se ha cambiado 1 test… conviene saber por qué» bajo un aviso que ya decía que estaba
+# autorizado; ahora la puerta dice quién lo autorizó y qué aserciones se quitan y se ponen
+jq -n '{congelados: [{commit:"abc1234", fichero:"tests/integration/seguridad.test.js", autorizado:true,
+   autorizacion:"Q-task-implementer-029: Andres Leon (Cliente), puerta g1", debilitamiento:["quita 7 aserción(es)"],
+   aserciones_quitadas:["expect(res.registro).toEqual([])", "expect(r.status).toBe(403)"], aserciones_puestas:["expect(res.registro).toHaveLength(1)"]}]}' > .sdd/hermes/fidelidad-7.json
+o=$($TX puerta fase "$K" --proyecto club --fase 7 --rc 0 --tests-editados 1 | jq -r .texto)
+echo "$o" | grep -q '^✏️ Se ha cambiado 1 test que ya existía, con la autorización que firmaste:' && ! echo "$o" | grep -q 'conviene saber por qué' \
+  && echo "$o" | grep -q '^   quita: expect(res.registro).toEqual(\[\]) · expect(r.status).toBe(403)$' && echo "$o" | grep -q '^   pone: expect(res.registro).toHaveLength(1)$' \
+  && ok "club, FASE-7: test cambiado con autorización firmada: quién y qué aserciones se quitan y se ponen (≤3 líneas)" || bad "tests autorizados: $o"
+jq '.congelados[0].autorizado = false' .sdd/hermes/fidelidad-7.json > "$T/f" && mv "$T/f" .sdd/hermes/fidelidad-7.json
+o=$($TX puerta fase "$K" --proyecto club --fase 7 --rc 0 --tests-editados 1 | jq -r .texto)
+echo "$o" | grep -q '^⛔ Se ha cambiado 1 test que ya existía y no lo autorizó nadie con su firma' && echo "$o" | grep -q 'SIN autorización firmada' \
+  && ok "…y sin autorización firmada lo dice con ⛔" || bad "tests sin autorizar: $o"
+# FASE-7: preguntas del implementador con jerga (`estadoVacio()`, art. 12, E_ZONA_SOLO_JUNTA): en el formato nuevo, la
+# frase para el cliente delante, lo técnico plegado, el efecto de cada opción y qué lanzará firmar
+cat > .sdd/questions-task-implementer.md <<'Q'
+## Q-task-implementer-030 [OPEN] skill=sdd-task-implementer context=TASK-F7-001
+Question: FASE-7, TASK-F7-001: la tarea pide migrar `club.json` a `version` 2 y que `estadoVacio()` nazca en `version` 2. Eso obliga a editar dos tests que ya existían (art. 12): `tests/integration/store.test.js:42` y `:63`.
+Para el cliente: ¿Cambiamos el formato en que se guardan los datos del club? Hoy funciona sin cambiarlo.
+Options:
+  A) Dejarlo así: campos opcionales en `version` 1, sin migración (recommended)
+     efecto: ninguno
+     cliente: Dejarlo como está: todo funciona y no hay nada que pasar al formato nuevo
+  B) Que una persona autorice editar esos dos tests y añadir la migración v1→v2
+     efecto: editar-test tests/integration/store.test.js
+     cliente: Cambiar el formato y adaptar la prueba que lo comprueba
+Blocks: nada
+Answer:
+
+## Q-task-implementer-031 [OPEN] skill=sdd-task-implementer context=TASK-F7-004
+Question: REQ-F-024 AC2: solo anoto «Acceso denegado» con `E_ZONA_SOLO_JUNTA`. ¿Se amplía a `E_NO_AUTORIZADO`?
+Para el cliente: ¿El registro de seguridad apunta también los intentos de entrar en zonas que no son de la junta?
+Options:
+  A) Sí, y que la prueba de accesos lo compruebe (recommended)
+     efecto: editar-test `tests/integration/accesos.test.js`, tests/e2e/helpers/servidor.js
+  B) No
+     efecto: ninguno
+  C) Cambiar el criterio
+     efecto: req-change
+Answer:
+Q
+o=$($TX puerta preguntas "$K" --proyecto club --fase 7 | jq -r .texto)
+echo "$o" | grep -q '^1. ¿Cambiamos el formato en que se guardan los datos del club?' && echo "$o" | grep -q '^   🔧 Detalle técnico: FASE-7, TASK-F7-001' \
+  && echo "$o" | grep -q '^   A) Dejarlo como está: todo funciona.*⭐ recomendada$' \
+  && echo "$o" | grep -q '^   B) Cambiar el formato y adaptar la prueba que lo comprueba  (✏️ autoriza editar tests/integration/store.test.js)$' \
+  && ok "club, FASE-7: la pregunta sale con su frase para el cliente y lo técnico plegado en una línea" || bad "para el cliente: $o"
+echo "$o" | grep -q '^👉 Si firmas sin tocar los botones Q, esto lanzará: ✏️ autoriza editar tests que ya existían: tests/integration/accesos.test.js (Q2), tests/e2e/helpers/servidor.js (Q2) · sin más efecto: Q1.$' \
+  && echo "$o" | grep -q '(📝 abre un cambio de requisitos)' \
+  && ok "antes de firmar: «esto lanzará…» con los tests que se autoriza editar" || bad "esto lanzará: $o"
+python3 - "$ROOT/plugin/hermes-sdd" <<'PYT' && ok "efecto declarado manda sobre la regex: «Sí: se mantiene el aplazamiento» no lanza trabajo; «No: quitar el límite y borrar el test» sí" || bad "efecto declarado"
+import sys; sys.path.insert(0, sys.argv[1]); import hsdd_textos as T
+b = ("## Q-x-001 [OPEN]\nQuestion: ¿?\nPara el cliente: ¿?\nOptions:\n  A) Sí: se mantiene el aplazamiento (recommended)\n     efecto: ninguno\n"
+     "  B) No: quitar el límite y borrar el test\n     efecto: accion\nAnswer:\n")
+assert T.accion_respuesta(b, "A") == "" and T.accion_respuesta(b, "B"), (T.efecto(b, "A"), T.efecto(b, "B"))
+# sin efecto (preguntas antiguas) se adivina como antes, y eso es lo que fallaba
+v = b.replace("     efecto: ninguno\n", "").replace("     efecto: accion\n", "")
+assert T.accion_respuesta(v, "A") and not T.accion_respuesta(v, "B")
+assert T.errores_pregunta(b) == [] and T.errores_pregunta(v) == []
+assert T.errores_pregunta(b.replace("efecto: accion", "efecto: editar-test")) == ["la opción B autoriza editar tests sin decir cuáles"]
+assert "le falta «Para el cliente:»" in T.errores_pregunta(b.replace("Para el cliente: ¿?\n", ""))
+PYT
+# cambio de una frase de un criterio: ✏️ con las palabras que cambian, no ➖/➕ casi iguales (club, INT-004)
+python3 - "$ROOT/plugin/hermes-sdd" <<'PYT' && ok "criterio cambiado en unas palabras: «x» pasa a «y», no ➖ y ➕ casi iguales" || bad "diff por palabras"
+import sys; sys.path.insert(0, sys.argv[1]); import hsdd_textos as T
+a = 'GIVEN "Iniciación" has 3 socios WHEN "lucia" signs up THEN the user sees "Estás apuntada a Iniciación" and the class shows "4 de 4 plazas"'
+b = 'GIVEN "Iniciación" has 3 socios WHEN "lucia" signs up THEN the user sees "Te has apuntado a Iniciación" and the class shows "4 de 4 plazas"'
+assert T._parecido(a, b) >= 0.6
+assert T._cambio_palabras(a, b) == '«"Estás apuntada» pasa a «"Te has apuntado»', T._cambio_palabras(a, b)
+PYT
+# el formato de pregunta del método: el ejemplo de references/async-questions.md es válido para el parser, y el gemelo
+# de docs/metodo/ es idéntico (estaba desincronizado: le faltaba «(req-change)»)
+python3 - "$ROOT/plugin/hermes-sdd" "$ROOT/metodo/references/async-questions.md" <<'PYT' && ok "el ejemplo de async-questions.md lo entiende el parser (efecto, ficheros, para el cliente)" || bad "ejemplo del formato"
+import re, sys; sys.path.insert(0, sys.argv[1]); import hsdd_textos as T
+ej = re.findall(r"```markdown\n(## Q-task-implementer-031.*?)```", open(sys.argv[2]).read(), re.S)[0]
+assert T.errores_pregunta(ej) == [], T.errores_pregunta(ej)
+assert T.efecto(ej, "A") == {"efecto": "editar-test", "ficheros": ["tests/integration/accesos.test.js"], "declarado": True,
+                             "cliente": "Sí, todos los intentos; se adapta la prueba que ya lo comprobaba"}, T.efecto(ej, "A")
+assert T.efecto(ej, "C")["efecto"] == "req-change" and T.efecto(ej, "B")["efecto"] == "ninguno"
+assert T.para_cliente(ej).startswith("¿El registro de seguridad")
+PYT
+d=""; for f in async-questions git-conventions handoff-protocol sdd-constitution; do cmp -s "$ROOT/metodo/references/$f.md" "$ROOT/docs/metodo/$f.md" || d="$d $f"; done
+[ -z "$d" ] && ok "docs/metodo/ y metodo/references/ dicen lo mismo" || bad "gemelos distintos:$d"
 cd "$R"
 exit $fail

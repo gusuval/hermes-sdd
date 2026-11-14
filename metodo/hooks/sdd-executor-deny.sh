@@ -17,12 +17,29 @@ bloquear() {  # bloquear <razón>: en el dialecto de quien pregunta
 # Herramientas de ficheros de Hermes (write_file, patch) y código suelto (execute_code): las decisiones, las puertas y
 # el estado de Hermes no se escriben desde una etapa (una decisión «humana» fabricada la firmaría el notario).
 HERRAMIENTA=$(printf '%s' "$IN" | jq -r '.tool_name // ""')
+# Las respuestas de una persona a las preguntas (.sdd/questions-*.md: «Answer: B — elegida por Ana», [ANSWERED]) las
+# escribe solo el notario al firmar una puerta. Una etapa escribe preguntas nuevas y «Applied:», nunca respuestas. Ya
+# no autorizan nada por sí solas (los permisos de editar tests son registros test-edit firmados), pero una respuesta
+# inventada sí cambiaría lo que hace la etapa siguiente. Se mira lo que se AÑADE: reescribir el fichero entero con las
+# respuestas que ya tenía no cuenta.
+RESPUESTA='^Answer:[[:space:]]*[^[:space:]]|\[ANSWERED\]|(elegida|aceptada) por '
+lineas_respuesta() { sed -E 's/^[-+[:space:]]*//' | grep -E "$RESPUESTA" | sort -u; }   # (sin el +/- de un parche)
+respuestas_nuevas() {  # respuestas_nuevas <ruta> <texto nuevo> <texto sustituido> → sale 0 si añade alguna
+  printf '%s' "$1" | grep -qE '(^|/)\.sdd/questions-[^/]*\.md$' || return 1
+  local antes="$3"; [ -n "$antes" ] || antes=$(cat "$1" 2>/dev/null || true)
+  comm -13 <(printf '%s\n' "$antes" | lineas_respuesta) <(printf '%s\n' "$2" | lineas_respuesta) | grep -q .
+}
 case "$HERRAMIENTA" in
   execute_code) bloquear "el ejecutor no ejecuta código suelto; usa la terminal" ;;
-  write_file|patch)
+  write_file|patch|Write|Edit|MultiEdit)
     RUTA=$(printf '%s' "$IN" | jq -r '.tool_input.path // .tool_input.file_path // ""')
     if printf '%s' "$RUTA" | grep -qE '(^~|/)\.hermes(/|$)|(^|/)\.sdd/hermes/(decisiones|puertas)(/|$)|(aprobadores|jev|sdd)\.json$'; then
       bloquear "las decisiones, las puertas y el estado de Hermes no se escriben desde una etapa ($RUTA)"
+    fi
+    NUEVO=$(printf '%s' "$IN" | jq -r '[.tool_input.content, .tool_input.new_string, .tool_input.patch, (.tool_input.edits // [] | .[].new_string)] | map(select(. != null)) | join("\n")')
+    VIEJO=$(printf '%s' "$IN" | jq -r '[.tool_input.old_string, (.tool_input.edits // [] | .[].old_string)] | map(select(. != null)) | join("\n")')
+    if respuestas_nuevas "$RUTA" "$NUEVO" "$VIEJO"; then
+      bloquear "las respuestas a las preguntas las escribe el notario al firmar la puerta, no una etapa ($RUTA): escribe la pregunta [OPEN] y termina"
     fi
     exit 0 ;;
 esac
@@ -63,6 +80,12 @@ check '\.hermes/'                                                 "$CMD_SIN_ARNE
 check '(firmar|decidir|puerta|jev|nuevo)\.sh|hsdd_(nucleo|proyectos)' "$CMD_SIN_ARNES" "las puertas, la firma, el modo de Jev y crear proyectos son del arnés, no del ejecutor"
 check '(aprobadores|jev|sdd)\.json'                                   "$CMD" "quién decide (aprobadores.json), el modo de Jev (jev.json) y la configuración (sdd.json) los fija una persona"
 check '(decisions|challenges)\.jsonl|gate-evidence'               "$ESCRIBE$ESCRIBE_I" "los registros humanos no se editan desde el ejecutor"
+# Respuestas escritas desde la terminal en .sdd/questions-*.md (echo, sed -i, tee, python…): ver respuestas_nuevas
+if [ -z "$motivo" ] && printf '%s' "$CMD" | grep -qE 'questions-[^[:space:]]*\.md' &&
+   printf '%s' "$CMD" | grep -qE 'Answer:[[:space:]]*[A-Z]|\[ANSWERED\]|(elegida|aceptada) por ' &&
+   printf '%s' "$CMD" | grep -qE '>|\btee\b|sed[[:space:]]+(.*[[:space:]])?-[a-zA-Z]*i|perl[[:space:]]+-[a-zA-Z]*i|open\(|write_?[Tt]ext|[Ff]ile(Sync)?\(|\.write\('; then
+  motivo="las respuestas a las preguntas las escribe el notario al firmar la puerta, no una etapa"
+fi
 check 'git[[:space:]]+push'                                       "$CMD_SIN_ARNES" "publicar (push) lo decide una persona"
 # Chrome abierto a mano (capturas, PDF, headless) sin llavero simulado: en macOS pide a la persona la contraseña del
 # llavero («Chromium Safe Storage») en CADA arranque (incidente raciones, 10/11/2026). No se para la etapa: se repite

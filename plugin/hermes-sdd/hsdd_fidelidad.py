@@ -5,9 +5,11 @@ tests y evidencias, y de que los tests no se cambian para que todo encaje.
     hsdd_fidelidad.py todo <repo> [--json]          las cinco comprobaciones
     hsdd_fidelidad.py congelados|vinculos|capturas|coherencia <repo> [--json]
 
-  congelados   tests que existían al aceptar una FASE (tag fase-N-accepted) y se cambiaron después: cada cambio que
-               quita o altera líneas necesita una pregunta respondida por una persona (no Jev) citada en el commit;
-               además se buscan señales de debilitamiento (aserciones quitadas o relajadas, .skip, reintentos…)
+  congelados   tests, helpers, fixtures y configuraciones de tests que existían al aceptar una FASE (tag
+               fase-N-accepted) y se cambiaron después: cada cambio necesita una autorización firmada por el notario
+               (registro test-edit de acceptance/decisions.jsonl que nombra ese fichero, de una persona, no Jev);
+               además se buscan señales de debilitamiento (aserciones quitadas o relajadas, .skip/.only, testIgnore,
+               return temprano, catch vacío, reintentos, plazos…)
   vinculos     cada test que cita un criterio (por su escenario o por «REQ-… ACn») tiene que contener sus textos exactos
                «…»: si le faltan los del THEN, cita el criterio sin comprobarlo
   capturas     cada captura de un criterio enseña lo que su línea «Se ve:» promete: primero lo que el test comprobó en
@@ -107,39 +109,146 @@ def en_texto(lit: str, texto: str) -> bool:
 
 
 # ── 1. tests congelados ─────────────────────────────────────────────────────────────────────────────────────────────
+# Al aceptar una FASE (tag fase-N-accepted) queda congelado, por el hash de su contenido en ese tag, todo lo que decide
+# si un test pasa: los ficheros de tests/ y test/ (también helpers, fixtures y snapshots; no los documentos .md del plan
+# de pruebas), cualquier *.test.* / *.spec.* y las configuraciones con las que se ejecutan (playwright.config.js,
+# vite.config.js…: un testIgnore o un `exclude` apaga tests sin tocarlos). club: tests/e2e/helpers/servidor.js cambió
+# tras aceptar y nadie lo vio, porque solo se miraban los *.test|spec.*.
 TRIVIAL = re.compile(r"^(import\b|export \{|from\s|//|#|/\*|\*|\}?\)?;?$|\}\);?$)")
-DEBIL = [  # (patrón en líneas añadidas, qué indica)
-    (re.compile(r"\.(skip|only|fixme)\s*\(|\btest\.fail\s*\(|\bxit\s*\(|\bxdescribe\s*\("), "test saltado, aislado o marcado como fallo esperado"),
-    (re.compile(r"\bretries\s*:"), "reintentos (ocultan la inestabilidad)"),
-    (re.compile(r"\btimeout\s*:\s*\d{5,}|setTimeout\(\s*\d{5,}"), "plazo muy alargado"),
-    (re.compile(r"page\.route\(|\.setContent\(|route\.fulfill\("), "el e2e simula la respuesta en vez de usar la app real"),
-    (re.compile(r"toBeTruthy\(\)|toBeDefined\(\)|toContain\(|toMatch\(\s*/\.\*"), "aserción laxa"),
+ES_TEST = re.compile(r"\.(test|spec)\.[cm]?[jt]sx?$|_test\.py$|(^|/)test_[^/]*\.py$")
+ES_CONFIG = re.compile(r"(^|/)(playwright|vitest|vite|jest|cypress|karma|ava|wdio|mocha)\.config\.[cm]?[jt]s$|(^|/)\.mocharc(\.\w+)?$"
+                       r"|(^|/)vitest\.workspace\.[cm]?[jt]s$|(^|/)(pytest\.ini|conftest\.py|tox\.ini|jest\.config\.json)$")
+NO_CONGELA = re.compile(r"\.md$|^test/[^/]+\.(csv|txt|ya?ml|json)$", re.I)   # el plan de pruebas del método no es un test
+DEBIL = [  # (patrón en lo añadido, qué indica)
+    (re.compile(r"\.(skip|only|fixme)\s*\(|\btest\.fail\s*\(|\bxit\s*\(|\bxdescribe\s*\(|\.todo\s*\(|\bit\.skipIf\b|\.skipIf\s*\("),
+     "test saltado, aislado o marcado como fallo esperado"),
+    (re.compile(r"\btestIgnore\b|\btestPathIgnorePatterns\b|\bgrepInvert\b|\bgrep\s*:|\bexclude\s*:|forbidOnly\s*:\s*false|passWithNoTests|modulePathIgnorePatterns"),
+     "excluye tests de la ejecución"),
+    (re.compile(r"\bretries\s*:|\.retry\s*\(|jest\.retryTimes"), "reintentos (ocultan la inestabilidad)"),
+    (re.compile(r"\btimeout\s*:\s*\d{5,}|setTimeout\(\s*\d{5,}|\btest\.setTimeout\s*\(|\btest\.slow\s*\(|jest\.setTimeout\s*\(|\btimeout\s*:\s*0\b"),
+     "plazo muy alargado"),
+    (re.compile(r"page\.route\(|\.setContent\(|route\.fulfill\(|vi\.mock\(|jest\.mock\("), "el test simula la respuesta en vez de usar la app real"),
+    (re.compile(r"toBeTruthy\(\)|toBeDefined\(\)|toContain\(|toMatch\(\s*/\.\*|expect\.anything\(\)|expect\.any\("), "aserción laxa"),
+    (re.compile(r"\bexpect\.soft\s*\("), "aserción blanda (no para el test)"),
+    (re.compile(r"^\s*return\s*;?\s*$|^\s*if\s*\(.*\)\s*\{?\s*return\b"), "return temprano (el test acaba antes de comprobar)"),
+    (re.compile(r"\|\|\s*true\b|continue-on-error"), "un fallo se da por bueno (|| true)"),
 ]
+# Sobre todo lo añadido junto (abarca varias líneas): un catch vacío se traga el fallo de la aserción
+DEBIL_JUNTO = [
+    (re.compile(r"catch\s*(?:\([^)]*\))?\s*\{\s*(?://[^\n]*\s*)*\}|\.catch\(\s*(?:\([^)]*\)|\w+)?\s*=>\s*(?:\{\s*\}|undefined|null|0)\s*\)"),
+     "try/catch que se traga el fallo"),
+]
+ASERCION = re.compile(r"\bexpect(?:\.soft)?\s*\(|\bassert\w*\s*[.(]|\bt\.(?:is|deepEqual|true|false|throws)\s*\(")
 
 
-def _autorizada(repo: Path, mensaje: str, fichero: str = "") -> tuple[bool, str]:
-    """¿El commit cita una pregunta contestada por una persona? (Jev no puede autorizar editar tests: art. 12). Si no
-    cita ninguna, vale una pregunta contestada por una persona que nombre ese fichero (club: Q-012 autorizaba editar
-    reservas.test.js y el commit no lo decía)."""
-    ids = re.findall(r"(?<![A-Za-z0-9-])Q-[a-z][A-Za-z0-9-]*-\d{3}\b", mensaje)   # Q-task-implementer-007, no REQ-F-003
-    if not ids and fichero:
-        for f in (repo / ".sdd").glob("questions-*.md"):
-            for b in re.findall(r"^## Q-.*?(?=^## |\Z)", f.read_text(encoding="utf-8", errors="replace"), re.M | re.S):
-                a = re.search(r"^Answer:[ \t]*([^\n]*)", b, re.M)
-                if Path(fichero).name in b and a and "elegida por" in a.group(1) and not re.search(r"\bjev\b", a.group(1), re.I):
-                    return True, f"{b.split()[1]} (nombra {Path(fichero).name}): {a.group(1).strip()}"
-    if not ids:
-        return False, "el commit no cita ninguna pregunta que lo autorice"
-    for qid in ids:
-        for f in (repo / ".sdd").glob("questions-*.md"):
-            m = re.search(rf"^## {re.escape(qid)}\b.*?^Answer:[ \t]*([^\n]*)", f.read_text(encoding="utf-8", errors="replace"), re.M | re.S)
-            if m:
-                quien = m.group(1)
-                if re.search(r"\bjev\b", quien, re.I):
-                    return False, f"{qid} la contestó Jev, no una persona"
-                if "elegida por" in quien or "aceptada por" in quien:
-                    return True, f"{qid}: {quien.strip()}"
-    return False, f"{', '.join(ids)} sin respuesta de una persona"
+def _clase(f: str) -> str:
+    """test (fichero de tests: añadir casos está bien), config (cómo se ejecutan) o apoyo (helpers, fixtures…)."""
+    return "config" if ES_CONFIG.search(f) else "test" if ES_TEST.search(f) else "apoyo"
+
+
+def congelables(repo: Path, ref: str) -> list[str]:
+    """Lo que queda congelado al aceptar en <ref>: tests/**, test/** (sin los documentos), *.test|spec.* y configs."""
+    fs = git(repo, "ls-tree", "-r", "--name-only", ref).splitlines()
+    return [f for f in fs if not NO_CONGELA.search(f)
+            and (f.startswith(("tests/", "test/")) or ES_TEST.search(f) or ES_CONFIG.search(f))]
+
+
+def _es_jev(r: dict) -> bool:
+    return bool(re.search(r"\bjev\b", f"{r.get('by', '')}", re.I) or re.search(r"agente autom", f"{r.get('role', '')}", re.I))
+
+
+def autorizaciones(repo: Path) -> list[dict]:
+    """Los permisos firmados para editar tests: registros test-edit de acceptance/decisions.jsonl tal como está en HEAD
+    (lo escribe solo el notario, firmar.sh; el arnés para una etapa que añada a ese registro algo que no sea una
+    medición). Cada uno se contrasta con el acta del notario en $HERMES_SDD_HOME, fuera del alcance de las etapas."""
+    out = []
+    for l in git(repo, "show", "HEAD:acceptance/decisions.jsonl").splitlines():
+        try:
+            r = json.loads(l)
+        except ValueError:
+            continue
+        if r.get("type") == "test-edit" and r.get("files") and r.get("head"):
+            out.append(r)
+    return out
+
+
+def _acta_confirma(r: dict) -> tuple[bool, str]:
+    actas = HOME / "actas"
+    if not actas.is_dir():
+        return True, " (sin actas del notario en esta máquina: vale el registro)"
+    for f in actas.glob(f"*/{r.get('gate', '')}.json"):
+        try:
+            a = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for x in a.get("autorizaciones") or []:
+            if x.get("pregunta") == r.get("question") and set(r["files"]) <= set(x.get("ficheros") or []):
+                return True, ""
+    return False, f"{r.get('question')}: el notario no tiene acta de esa autorización (puerta {r.get('gate') or '?'})"
+
+
+def _autorizada(repo: Path, sha: str, fichero: str, auts: list[dict] | None = None) -> tuple[bool, str]:
+    """¿Una persona autorizó, firmado por el notario, editar <fichero> en el commit <sha>? Vale un registro test-edit que
+    nombre ese fichero, anterior al commit (su HEAD es antecesor) y sin una aceptación por medio (un test editado y
+    aceptado vuelve a quedar congelado; la aceptación de la misma puerta que lo autorizó no cuenta). Ni el mensaje del
+    commit ni las preguntas de .sdd/ autorizan nada: las puede escribir la propia etapa."""
+    auts = autorizaciones(repo) if auts is None else auts
+    motivo = "ninguna autorización firmada por una persona nombra este fichero"
+    for r in auts:
+        if fichero not in r["files"]:
+            continue
+        if _es_jev(r):
+            motivo = f"{r.get('question')} la registró Jev, no una persona"
+            continue
+        if subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", r["head"], sha], capture_output=True).returncode != 0:
+            motivo = f"{r.get('question')} se firmó después de este commit"
+            continue
+        caducada = False
+        entre = set(git(repo, "rev-list", f"{r['head']}..{sha}").split())
+        for tag in git(repo, "tag", "-l", "fase-*-accepted", "entrega-*").split():
+            c = git(repo, "rev-list", "-n1", tag).strip()
+            if c in entre and f"Gate-Id: {r.get('gate')}" not in git(repo, "log", "-1", "--format=%B", c):
+                caducada = True
+                motivo = f"{r.get('question')} caducó al aceptar {tag}"
+                break
+        if caducada:
+            continue
+        ok, nota = _acta_confirma(r)
+        if not ok:
+            motivo = nota
+            continue
+        return True, f"{r.get('question')}: {r.get('by')} ({r.get('role')}), puerta {r.get('gate') or '?'}{nota}"
+    return False, motivo
+
+
+def _diff_por_fichero(repo: Path, sha: str, ficheros: list[str]) -> dict:
+    diff = git(repo, "show", "-U0", "--format=", sha, "--", *ficheros)
+    actual, por_fichero = None, {}
+    for l in diff.splitlines():
+        if l.startswith("diff --git"):
+            actual = l.split(" b/")[-1]; por_fichero.setdefault(actual, [[], []])
+        elif actual and l.startswith("-") and not l.startswith("---"):
+            por_fichero[actual][0].append(l[1:].strip())
+        elif actual and l.startswith("+") and not l.startswith("+++"):
+            por_fichero[actual][1].append(l[1:].strip())
+    return por_fichero
+
+
+def debilitamiento(quitadas: list[str], puestas: list[str]) -> list[str]:
+    """Señales de que un cambio comprueba menos: patrones en lo añadido y aserciones que se van."""
+    senales = sorted({d for x in puestas for rx, d in DEBIL if rx.search(x)}
+                     | {d for rx, d in DEBIL_JUNTO if rx.search("\n".join(puestas))})
+    aq = sum(len(ASERCION.findall(x)) for x in quitadas)
+    ap = sum(len(ASERCION.findall(x)) for x in puestas)
+    if aq > ap:
+        senales.append(f"quita {aq - ap} aserción(es)")
+    cita = lambda xs: set(re.findall(r"REQ-[A-Z]+-\d{3}(?: AC\d+)?|AC-\d{3}-\d{2}", " ".join(xs)))
+    # una cita sustituida por otra más concreta del mismo requisito («REQ-F-001» → «REQ-F-001 AC5») no se quita
+    puestas_c = cita(puestas)
+    quitadas_citas = sorted(c for c in cita(quitadas) - puestas_c if not any(x.startswith(c) for x in puestas_c))
+    if quitadas_citas:
+        senales.append("deja de citar " + ", ".join(quitadas_citas[:6]) + ("…" if len(quitadas_citas) > 6 else ""))
+    return senales
 
 
 def congelados(repo: Path, desde: str | None = None) -> list[dict]:
@@ -147,46 +256,36 @@ def congelados(repo: Path, desde: str | None = None) -> list[dict]:
     out = []
     ya = set(git(repo, "rev-list", desde).split()) if desde else set()
     tags = [t for t in git(repo, "tag", "-l", "fase-*-accepted", "--sort=creatordate").split() if t]
-    vistos = set()
+    auts = autorizaciones(repo)
+    vistos = set()   # (commit, fichero): un commit que toca un test de la FASE-0 y otro de la FASE-1 informa de los dos
     for tag in tags:
-        ficheros = [f for f in git(repo, "ls-tree", "-r", "--name-only", tag, "--", "tests", "test").split()
-                    if re.search(r"\.(test|spec)\.[cm]?[jt]sx?$|_test\.py$|test_.*\.py$", f)]
+        ficheros = congelables(repo, tag)
         if not ficheros:
             continue
         for linea in git(repo, "log", "--format=%H%x09%s", f"{tag}..HEAD", "--", *ficheros).splitlines():
             sha, asunto = linea.split("\t", 1)
-            if sha.startswith("Merge") or (sha in vistos) or sha in ya:
+            if sha in ya:
                 continue
             if len(git(repo, "rev-list", "--parents", "-n1", sha).split()) > 2:   # merge: los cambios ya están en sus commits
                 continue
-            diff = git(repo, "show", "-U0", "--format=", sha, "--", *ficheros)
-            quitadas, puestas, actual, por_fichero = [], [], None, {}
-            for l in diff.splitlines():
-                if l.startswith("diff --git"):
-                    actual = l.split(" b/")[-1]; por_fichero.setdefault(actual, [[], []])
-                elif actual and l.startswith("-") and not l.startswith("---"):
-                    por_fichero[actual][0].append(l[1:].strip())
-                elif actual and l.startswith("+") and not l.startswith("+++"):
-                    por_fichero[actual][1].append(l[1:].strip())
-            for f, (q, p) in por_fichero.items():
-                cambiadas = [x for x in q if x and not TRIVIAL.match(x) and x not in set(p)]
-                senales = sorted({d for x in p for rx, d in DEBIL if rx.search(x)})
-                asercion_q = sum(1 for x in q if "expect(" in x or "assert" in x)
-                asercion_p = sum(1 for x in p if "expect(" in x or "assert" in x)
-                if asercion_q > asercion_p:
-                    senales.append(f"quita {asercion_q - asercion_p} aserción(es)")
-                cita = lambda xs: set(re.findall(r"REQ-[A-Z]+-\d{3}(?: AC\d+)?|AC-\d{3}-\d{2}", " ".join(xs)))
-                # una cita sustituida por otra más concreta del mismo requisito («REQ-F-001» → «REQ-F-001 AC5») no se quita
-                puestas_c = cita(p)
-                quitadas_citas = sorted(c for c in cita(q) - puestas_c if not any(x.startswith(c) for x in puestas_c))
-                if quitadas_citas:
-                    senales.append("deja de citar " + ", ".join(quitadas_citas[:6]) + ("…" if len(quitadas_citas) > 6 else ""))
+            for f, (q, p) in _diff_por_fichero(repo, sha, ficheros).items():
+                if (sha, f) in vistos:
+                    continue
+                clase = _clase(f)
+                pset = set(p)
+                cambiadas = [x for x in q if x and not TRIVIAL.match(x) and x not in pset]
+                if clase != "test":   # en helpers, fixtures y configs también cuenta lo añadido: ahí no van tests nuevos
+                    qset = set(q)
+                    cambiadas += [x for x in p if x and not TRIVIAL.match(x) and x not in qset]
+                senales = debilitamiento(q, p)
                 if not cambiadas and not senales:
                     continue
-                ok, por = _autorizada(repo, git(repo, "log", "-1", "--format=%B", sha), f)
-                vistos.add(sha)
-                out.append({"commit": sha[:7], "asunto": asunto, "fichero": f, "congelado_en": tag,
+                ok, por = _autorizada(repo, sha, f, auts)
+                vistos.add((sha, f))
+                out.append({"commit": sha[:7], "asunto": asunto, "fichero": f, "clase": clase, "congelado_en": tag,
                             "lineas_cambiadas": len(cambiadas), "debilitamiento": senales,
+                            "aserciones_quitadas": [x for x in q if ASERCION.search(x) and x not in pset][:3],
+                            "aserciones_puestas": [x for x in p if ASERCION.search(x) and x not in set(q)][:3],
                             "autorizado": ok, "autorizacion": por,
                             # autorizado por una persona: lo que hizo es lo que se pidió; las señales quedan a la vista, sin grave
                             "grave": not ok})

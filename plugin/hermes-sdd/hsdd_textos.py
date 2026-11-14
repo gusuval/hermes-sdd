@@ -182,13 +182,39 @@ def _ajustes(repo: Path) -> list[str]:
         previos = viejo.get(rid)
         if previos is None or previos == crits:
             continue
-        for c in previos:
-            if c not in crits:
-                out.append(f"➖ {nombres.get(rid, rid)}: se quita el criterio «{_corta(c, 180)}»")
-        for c in crits:
-            if c not in previos:
-                out.append(f"➕ {nombres.get(rid, rid)}: nuevo criterio «{_corta(c, 180)}»")
-    return out[:8]
+        quitados = [c for c in previos if c not in crits]
+        puestos = [c for c in crits if c not in previos]
+        # un criterio que cambia unas palabras no es «se quita» + «nuevo» casi iguales (club, INT-004): se empareja con
+        # el más parecido y se dice qué palabras cambian
+        for c in list(quitados):
+            par = max(puestos, key=lambda x: _parecido(c, x), default=None)
+            if par is not None and _parecido(c, par) >= 0.6:
+                out.append(f"✏️ {nombres.get(rid, rid)}: en el criterio «{_corta(c, 120)}» {_cambio_palabras(c, par)}")
+                quitados.remove(c); puestos.remove(par)
+        out += [f"➖ {nombres.get(rid, rid)}: se quita el criterio «{_corta(c, 180)}»" for c in quitados]
+        out += [f"➕ {nombres.get(rid, rid)}: nuevo criterio «{_corta(c, 180)}»" for c in puestos]
+    return out[:8] + ([f"… y {len(out) - 8} cambios más (el detalle está en requirements/REQUIREMENTS.md)"] if len(out) > 8 else [])
+
+
+def _parecido(a: str, b: str) -> float:
+    import difflib
+    return difflib.SequenceMatcher(None, a.split(), b.split()).ratio()
+
+
+def _cambio_palabras(a: str, b: str) -> str:
+    """««x» pasa a «y»; se añade «z»» con las palabras que cambian de a a b (hasta 3 cambios)."""
+    import difflib
+    wa, wb = a.split(), b.split()
+    cambios = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, wa, wb).get_opcodes():
+        x, y = " ".join(wa[i1:i2]), " ".join(wb[j1:j2])
+        if op == "replace":
+            cambios.append(f"«{_corta(x, 80)}» pasa a «{_corta(y, 80)}»")
+        elif op == "delete":
+            cambios.append(f"se quita «{_corta(x, 80)}»")
+        elif op == "insert":
+            cambios.append(f"se añade «{_corta(y, 80)}»")
+    return "; ".join(cambios[:3]) + (f" (y {len(cambios) - 3} cambios más)" if len(cambios) > 3 else "")
 
 
 # ── puertas ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -343,8 +369,9 @@ def _filas_gate(md: str) -> list[dict]:
     return filas
 
 
-def _lineas_veredictos(repo: Path, filas: list[dict]) -> list[str]:
+def _lineas_veredictos(repo: Path, filas: list[dict], rev: dict | None = None) -> list[str]:
     plano = {r["id"]: _texto_req(r) for r in requisitos(repo)}
+    tuyos = {r["id"] for r in (rev or {}).get("revisar") or []}
     out = []
     for f in filas:
         # «MISSING (no visual evidence)»: el veredicto es la primera palabra; el motivo, entre paréntesis, se traduce
@@ -358,12 +385,67 @@ def _lineas_veredictos(repo: Path, filas: list[dict]) -> list[str]:
             ico, txt = "⚠️", f"pasa sus pruebas, pero la revisión independiente duda de que lo comprueben ({ids})"
         elif motivo:
             txt = MOTIVOS.get(motivo, txt)
+        if f["id"] in tuyos and clave in ("MISSING", "PARTIAL"):
+            # es justo lo que la persona revisa en 🔍: no es un «⚠️ sin comprobar» (club, entrega: «Tono cercano»)
+            ico, txt = "🔍", "lo compruebas tú (abajo, en 🔍)"
         crit = ""
         m = re.match(r"(\d+)\s*/\s*(\d+)", f["criterios"])
         if m:
             crit = f" ({m.group(1)} de {m.group(2)} {'criterio' if m.group(2) == '1' else 'criterios'})"
         out.append(f"{ico} {f['titulo'] or plano.get(f['id'], f['id'])}: {txt}{crit}")
     return out
+
+
+def _agrupa(lineas: list[str], max_ok: int = 3) -> list[str]:
+    """Las excepciones (❌ ⚠️ 🟡 🔍) primero y una por línea; los ✅, si son más de <max_ok>, en una sola línea (club,
+    entrega: 29 líneas ✅ iguales tapaban la única que había que mirar)."""
+    ok = [l for l in lineas if l.startswith("✅")]
+    resto = [l for l in lineas if not l.startswith("✅")]
+    if len(ok) <= max_ok:
+        return resto + ok
+    nombres = [re.sub(r"^✅ (.*?): funciona y está comprobado.*$", r"\1", l) for l in ok]
+    return resto + [f"✅ {len(ok)} requisitos funcionan y están comprobados: " + _corta("; ".join(nombres), 300)]
+
+
+def _bloque_tests(repo: Path, fase: str | None, editados: int) -> str:
+    """Tests que ya existían y cambiaron desde la última aceptación, con lo que dice hsdd_fidelidad (si los autorizó una
+    persona con su firma y qué aserciones se quitan o se ponen, ≤ 3 líneas por test). Sin ese informe, el recuento."""
+    try:
+        cong = json.loads(_leer(repo / ".sdd" / "hermes" / f"fidelidad-{fase if fase not in (None, '') else 'global'}.json") or "{}").get("congelados")
+    except ValueError:
+        cong = None
+    if cong is None:
+        if not editados:
+            return "🛡 No se ha tocado ningún test que ya existía."
+        return (f"⚠️ {'Se ha cambiado 1 test que ya existía' if editados == 1 else f'Se han cambiado {editados} tests que ya existían'}: "
+                "conviene saber por qué antes de aceptar.")
+    if not cong:
+        return "🛡 No se ha tocado ningún test que ya existía (ni sus ayudas ni su configuración)."
+    por_f: dict = {}
+    for x in cong:
+        d = por_f.setdefault(x["fichero"], {"autorizado": True, "por": set(), "q": [], "p": [], "senales": set()})
+        d["autorizado"] &= bool(x.get("autorizado"))
+        d["por"].add(x.get("autorizacion", "").split(":")[0] if x.get("autorizado") else "")
+        d["q"] += x.get("aserciones_quitadas") or []; d["p"] += x.get("aserciones_puestas") or []
+        d["senales"] |= set(x.get("debilitamiento") or [])
+    sin = [f for f, d in por_f.items() if not d["autorizado"]]
+    n = len(por_f)
+    cab = (f"⛔ {'Se ha cambiado 1 test que ya existía' if n == 1 else f'Se han cambiado {n} tests que ya existían'} y "
+           f"{'no lo autorizó' if len(sin) == n else f'{len(sin)} no los autorizó'} nadie con su firma: no debería aceptarse sin saber por qué."
+           if sin else
+           f"✏️ {'Se ha cambiado 1 test que ya existía' if n == 1 else f'Se han cambiado {n} tests que ya existían'}, con la autorización que firmaste:")
+    filas = []
+    for f, d in list(por_f.items())[:6]:
+        quien = ", ".join(sorted(x for x in d["por"] if x))
+        filas.append(f"• {f}: " + (f"autorizado ({quien})" if d["autorizado"] else "SIN autorización firmada")
+                     + (f" — {', '.join(sorted(d['senales']))}" if d["senales"] else ""))
+        if d["q"]:
+            filas.append(f"   quita: {_corta(' · '.join(d['q'][:2]), 160)}")
+        if d["p"]:
+            filas.append(f"   pone: {_corta(' · '.join(d['p'][:2]), 160)}")
+    if len(por_f) > 6:
+        filas.append(f"… y {len(por_f) - 6} más")
+    return cab + "\n" + "\n".join(filas)
 
 
 def _cabeza_ok(filas: list[dict], de_fase: bool) -> str:
@@ -450,17 +532,15 @@ def puerta_fase(repo: Path, proyecto: str, fase: str, gate_md: str, rc: int, tes
         cabeza = "⛔ Los requisitos pasan sus tests, pero la revisión independiente ha encontrado algo que no prueban."
     elif rev and rev.get("solo"):
         cabeza = "🔍 Solo falta tu revisión: lo que queda por comprobar no lo puede comprobar un test."
-    else:
-        cabeza = ("⛔ No pasa la comprobación: hay requisitos que fallan o sin comprobar. "
-                  "Solo puedes rechazarla para que se corrija.")
+    else:   # puerta.sh ofrece ❌ Rechazar y 🟡 Aceptar sin lo que falta: el texto no puede decir «solo rechazar»
+        cabeza = ("⛔ No pasa la comprobación: hay requisitos que fallan o sin comprobar. No se puede aceptar tal cual: "
+                  "recházala para que se corrija o, si lo que falta puede esperar, acéptala sin ello.")
     partes = [f"🧪 La FASE-{fase} de «{proyecto}» está lista para revisar.", cabeza]
     if filas:
-        partes.append("\n".join(_lineas_veredictos(repo, filas)))
+        partes.append("\n".join(_agrupa(_lineas_veredictos(repo, filas, rev))))
     partes += _bloque_impugnaciones(repo, imp)
     partes += _bloque_revisar(rev)
-    partes.append("🛡 No se ha tocado ningún test que ya existía." if not tests_editados else
-                  f"⚠️ {'Se ha cambiado 1 test que ya existía' if tests_editados == 1 else f'Se han cambiado {tests_editados} tests que ya existían'}: "
-                  "conviene saber por qué antes de aceptar.")
+    partes.append(_bloque_tests(repo, fase, tests_editados))
     demo = [x for x in ((f"vídeo" if video else ""), (_plural(capturas, "captura", "capturas") if capturas else "")) if x]
     partes.append(f"🎬 Demo: {' y '.join(demo)}." if demo else "🎬 Esta fase no trae demo (ni vídeo ni capturas).")
     partes.append(_que_pulsar(rc, rev, "aceptarla", "aceptarla con observaciones", "rechazarla", demo=True))
@@ -503,17 +583,16 @@ def puerta_entrega(repo: Path, proyecto: str, gate_md: str, rc: int, fases_acept
     elif rc == 4:
         cabeza = "⛔ Los requisitos pasan sus tests, pero la revisión independiente ha encontrado algo que no prueban."
     else:
-        cabeza = "⛔ No pasa la comprobación final: solo puedes rechazarla para que se corrija."
+        cabeza = ("⛔ No pasa la comprobación final. No se puede aceptar tal cual: recházala para que se corrija o, si lo "
+                  "que falta puede esperar, acéptala sin ello.")
     partes = [f"🎁 «{proyecto}» está terminado y listo para entregar.", cabeza]
     if filas:
-        partes.append("\n".join(_lineas_veredictos(repo, filas)))
+        partes.append("\n".join(_agrupa(_lineas_veredictos(repo, filas, rev))))
     partes += _bloque_impugnaciones(repo, imp)
     partes += _bloque_revisar(rev)
     if unica:   # plan compacto: una sola fase, sin puerta propia; se acepta aquí con su demo
         partes.append("🧩 Se hizo en una sola fase: al aceptar la entrega aceptas también esa fase.")
-        partes.append("🛡 No se ha tocado ningún test que ya existía." if not tests_editados else
-                      f"⚠️ {'Se ha cambiado 1 test que ya existía' if tests_editados == 1 else f'Se han cambiado {tests_editados} tests que ya existían'}: "
-                      "conviene saber por qué antes de aceptar.")
+        partes.append(_bloque_tests(repo, None, tests_editados))
         demo = [x for x in (("vídeo" if video else ""), (_plural(capturas, "captura", "capturas") if capturas else "")) if x]
         partes.append(f"🎬 Demo: {' y '.join(demo)}." if demo else "🎬 No hay demo (ni vídeo ni capturas).")
         partes.append(_que_pulsar(rc, rev, "aceptar la entrega", "aceptarla con observaciones", "rechazarla", demo=True))
@@ -567,10 +646,83 @@ def opciones(bloque: str) -> list[tuple[str, str, bool]]:
 
 
 def opciones_json(bloque: str) -> dict:
-    """{opciones: [letras], recomendada: letra} para los botones Q (sin marca, la primera)."""
+    """{opciones: [letras], recomendada: letra, efectos: {letra: {efecto, ficheros, declarado}}, cliente} para los
+    botones Q (sin marca, la primera) y para el notario: lo que hará cada opción, tal como lo vio la persona."""
     ops = opciones(bloque)
     rec = next((l for l, _, r in ops if r), ops[0][0] if ops else "")
-    return {"opciones": [l for l, _, _ in ops], "recomendada": rec}
+    return {"opciones": [l for l, _, _ in ops], "recomendada": rec,
+            "efectos": {l: {k: v for k, v in efecto(bloque, l).items() if k in ("efecto", "ficheros", "declarado")} for l, _, _ in ops},
+            "cliente": para_cliente(bloque)}
+
+
+# ── efecto declarado de cada opción (formato de pregunta de references/async-questions.md) ──────────────────────────
+# Debajo de cada opción, una línea «efecto: ninguno | accion | req-change | editar-test <ficheros>» dice qué pasa al
+# elegirla: nada, trabajo para la etapa que aplica las respuestas, un cambio de requisitos con su propia puerta, o
+# permiso (firmado por el notario) para editar exactamente esos tests que ya existían. Sin efecto declarado (preguntas
+# antiguas) se adivina con las reglas de siempre (pide_cambio, _SIN_ACCION) y nunca autoriza editar un test.
+EFECTOS = {"ninguno": "ninguno", "none": "ninguno", "nada": "ninguno", "accion": "accion", "acción": "accion",
+           "action": "accion", "req-change": "req-change", "editar-test": "editar-test", "edit-test": "editar-test"}
+_EFECTO = re.compile(r"^\s+(?:efecto|effect)\s*:\s*(\S+)\s*(.*?)\s*$", re.I)
+_CLIENTE_Q = re.compile(r"^(?:Para el cliente|For the customer)\s*:\s*(.*\S)\s*$", re.M | re.I)
+_CLIENTE_OP = re.compile(r"^\s+(?:cliente|para el cliente|customer)\s*:\s*(.*\S)\s*$", re.I)
+_OP_UNA = re.compile(r"^\s+([A-Z])\s*[★⭐️]*\s*\)\s*(.*)$")
+
+
+def para_cliente(bloque: str) -> str:
+    m = _CLIENTE_Q.search(bloque)
+    return m.group(1).strip() if m else ""
+
+
+def efectos(bloque: str) -> dict:
+    """{letra: {efecto|None|"?", ficheros, cliente, crudo}} de las líneas «efecto:» y «cliente:» bajo cada opción."""
+    out, actual = {}, None
+    for l in bloque.splitlines():
+        m = _OP_UNA.match(l)
+        if m:
+            actual = m.group(1)
+            out[actual] = {"efecto": None, "ficheros": [], "cliente": "", "crudo": ""}
+            continue
+        if actual is None:
+            continue
+        if l.strip() and not l[:1].isspace():   # «Blocks:», «Answer:»… cierran la lista de opciones
+            actual = None
+            continue
+        e = _EFECTO.match(l)
+        if e:
+            crudo = e.group(1).strip("`:,").lower()
+            out[actual].update(crudo=crudo, efecto=EFECTOS.get(crudo, "?"),
+                               ficheros=[f.strip("`'\"") for f in re.split(r"[,;\s]+", e.group(2)) if f.strip("`'\"")])
+            continue
+        c = _CLIENTE_OP.match(l)
+        if c:
+            out[actual]["cliente"] = c.group(1).strip()
+    return out
+
+
+def efecto(bloque: str, letra: str) -> dict:
+    """{efecto, ficheros, declarado, cliente} de la opción <letra>. Sin «efecto:» se adivina (preguntas antiguas)."""
+    d = efectos(bloque).get(letra.upper())
+    if d and d["efecto"]:
+        return {"efecto": d["efecto"], "ficheros": d["ficheros"], "declarado": True, "cliente": d["cliente"]}
+    txt = next((t for l, t, _ in opciones(bloque) if l == letra.upper()), "")
+    adivinado = "req-change" if pide_cambio(txt) else "ninguno" if _SIN_ACCION.search(txt) else "accion"
+    return {"efecto": adivinado if txt else "?", "ficheros": [], "declarado": False, "cliente": (d or {}).get("cliente", "")}
+
+
+def errores_pregunta(bloque: str) -> list[str]:
+    """Lo que le falta a una pregunta del formato nuevo (alguna opción declara efecto). Las antiguas no se juzgan."""
+    ef = efectos(bloque)
+    if not any(d["efecto"] for d in ef.values()):
+        return []
+    errs = [] if para_cliente(bloque) else ["le falta «Para el cliente:»"]
+    for l, d in ef.items():
+        if not d["efecto"]:
+            errs.append(f"la opción {l} no dice su efecto")
+        elif d["efecto"] == "?":
+            errs.append(f"la opción {l} tiene un efecto desconocido («{d['crudo']}»: vale ninguno, accion, req-change o editar-test)")
+        elif d["efecto"] == "editar-test" and not d["ficheros"]:
+            errs.append(f"la opción {l} autoriza editar tests sin decir cuáles")
+    return errs
 
 
 # Una opción que pide cambiar los requisitos: la marca explícita del método «(req-change)» o, en preguntas escritas
@@ -609,35 +761,209 @@ def respuesta(bloque: str, letra: str) -> str:
 
 def peticion_cambio(bloque: str, letra: str) -> str:
     """Si la opción <letra> de la pregunta pide cambiar los requisitos, la petición para /cambio (si no, "")."""
-    txt = next((t for l, t, _ in opciones(bloque) if l == letra.upper()), "")
-    return respuesta(bloque, letra) if txt and pide_cambio(txt) else ""
+    return respuesta(bloque, letra) if efecto(bloque, letra)["efecto"] == "req-change" else ""
 
 
 def accion_respuesta(bloque: str, letra: str) -> str:
-    """Si la opción elegida pide hacer algo que no es cambiar requisitos (ajustar un test, editar el plan…), la
-    respuesta para la etapa que la aplica (si no, "")."""
-    txt = next((t for l, t, _ in opciones(bloque) if l == letra.upper()), "")
-    return respuesta(bloque, letra) if txt and not pide_cambio(txt) and not _SIN_ACCION.search(txt) else ""
+    """Si la opción elegida pide trabajo que no es cambiar requisitos (ajustar un test, editar el plan…), la respuesta
+    para la etapa que la aplica (si no, ""). Con editar-test, dice qué tests autorizó la persona, y solo esos."""
+    e = efecto(bloque, letra)
+    if e["efecto"] not in ("accion", "editar-test"):
+        return ""
+    r = respuesta(bloque, letra)
+    if r and e["efecto"] == "editar-test":
+        r += ("\nTests ya existentes que la persona autoriza editar (solo estos; firmado en acceptance/decisions.jsonl): "
+              + ", ".join(e["ficheros"]))
+    return r
+
+
+# ── respuestas de la persona: «Q1: A, Q2: B» (lo añade el canal) frente a lo que la puerta enseñó ─────────────────
+# Solo «Qn: L» o «Qn=L» con la letra en mayúscula cuentan («De Q1 a Q3 lo recomendado» no es una respuesta). Una letra
+# que no es opción de esa pregunta, una pregunta que no existe o dos letras para la misma rechazan la decisión.
+_PAR_Q = re.compile(r"(?<![A-Za-z0-9-])[Qq](\d{1,3})\s*[:=·]\s*([A-Z])(?![\wÀ-ÿ])")
+
+
+def _letras(xs: list) -> str:
+    xs = list(xs)
+    return (", ".join(xs[:-1]) + " o " + xs[-1]) if len(xs) > 1 else (xs[0] if xs else "ninguna")
+
+
+def bloques_preguntas(ficheros: list) -> dict:
+    """{Q-id: bloque} de todas las preguntas (abiertas o no) de .sdd/questions-*.md."""
+    out = {}
+    for f in sorted(str(x) for x in ficheros):
+        for b in re.findall(r"^## Q-.*?(?=^## |\Z)", _leer(Path(f)), flags=re.M | re.S):
+            out.setdefault(b.split()[1], b)
+    return out
+
+
+def preguntas_de(puerta: dict, ficheros: list) -> list[dict]:
+    """[{n, id, opciones, recomendada, efectos, bloque}]: las que enseñó la puerta (su número es el del botón Q) o, si la
+    puerta no las guardó, las abiertas de los ficheros en orden."""
+    bloques = bloques_preguntas(ficheros)
+    qs = []
+    if puerta.get("preguntas"):
+        for q in puerta["preguntas"]:
+            b = bloques.get(q.get("id"), "")
+            vista = {k: v for k, v in q.items() if k in ("opciones", "recomendada", "efectos") and v}
+            qs.append({**(opciones_json(b) if b else {}), **vista, "n": int(q["n"]), "id": q.get("id"), "bloque": b})
+    else:
+        n = 0
+        for qid, b in bloques.items():
+            if re.match(r"^## Q-\S+\s+\[OPEN\]", b):
+                n += 1
+                qs.append({**opciones_json(b), "n": n, "id": qid, "bloque": b})
+    return qs
+
+
+def elegidas(texto: str, qs: list[dict]) -> tuple[dict, list[str]]:
+    """({n: letra}, errores) de «Q1: A, Q2: B» frente a las preguntas de la puerta."""
+    por_n = {int(q["n"]): q for q in qs}
+    out, errs = {}, []
+    for n, l in _PAR_Q.findall(texto or ""):
+        n = int(n)
+        q = por_n.get(n)
+        if q is None:
+            errs.append(f"Q{n} no existe (la puerta tenía {_plural(len(por_n), 'pregunta', 'preguntas')})")
+        elif l not in (q.get("opciones") or []):
+            errs.append(f"Q{n}: «{l}» no es una de sus opciones ({_letras(q.get('opciones') or [])})")
+        elif n in out and out[n] != l:
+            errs.append(f"Q{n} tiene dos respuestas distintas ({out[n]} y {l})")
+        else:
+            out[n] = l
+    return out, errs
+
+
+def plan_respuestas(puerta: dict, ficheros: list, texto: str, verbo: str) -> tuple[list[dict], list[str], str]:
+    """(respuestas [{q, letra, como, efecto}], errores, modo). Con «Qn: L» en el texto, esas; si no, aceptar, dar
+    conformidad o responder contestan todas con la recomendada (como enseña la puerta: «si te vale, no toques nada»)."""
+    qs = preguntas_de(puerta, ficheros)
+    el, errs = elegidas(texto, qs)
+    if el:
+        modo = "elegidas"
+        res = [{"q": q, "letra": el[q["n"]], "como": "elegida por"} for q in qs if q["n"] in el]
+    elif verbo in ("acepto", "conforme", "respondo"):
+        modo = "recomendada"
+        res = [{"q": q, "letra": q.get("recomendada") or "", "como": "opción recomendada, aceptada por"} for q in qs]
+        res = [r for r in res if r["letra"]]
+    else:
+        modo, res = "", []
+    for r in res:
+        b = r["q"].get("bloque") or ""
+        vista = (r["q"].get("efectos") or {}).get(r["letra"])
+        # sin el bloque (la pregunta ya no está en .sdd/) no hay nada que escribir ni que lanzar: vale lo que vio la puerta
+        r["efecto"] = efecto(b, r["letra"]) if b else {"efecto": "ninguno", "ficheros": [], **(vista or {})}
+    return res, errs, modo
+
+
+def validar_respuestas(puerta: dict, ficheros: list, texto: str, verbo: str, persona: bool) -> list[str]:
+    """Lo que hace inválida una decisión antes de firmar nada: letras que no existen y permisos que no caben."""
+    res, errs, _ = plan_respuestas(puerta, ficheros, texto, verbo)
+    for r in res:
+        e, qn = r["efecto"], f"Q{r['q']['n']} ({r['q'].get('id')})"
+        if e.get("efecto") == "editar-test":
+            if not persona:
+                errs.append(f"{qn}: editar un test que ya existía lo autoriza una persona, no Jev (art. 12)")
+            elif not e.get("ficheros"):
+                errs.append(f"{qn}: la opción {r['letra']} autoriza editar tests sin decir cuáles")
+        elif e.get("efecto") == "?":
+            errs.append(f"{qn}: la opción {r['letra']} tiene un efecto desconocido; no se puede saber qué lanzaría")
+    return errs
+
+
+def aplicar_respuestas(puerta: dict, ficheros: list, texto: str, verbo: str, quien: str, hoy: str) -> dict:
+    """Escribe «Answer: L — …» en cada pregunta contestada y devuelve {peticiones, por_aplicar, autorizaciones}."""
+    res, errs, _ = plan_respuestas(puerta, ficheros, texto, verbo)
+    if errs:
+        raise ValueError("; ".join(errs))
+    out = {"peticiones": [], "por_aplicar": [], "autorizaciones": []}
+    por_id = {r["q"]["id"]: r for r in res}
+    for f in sorted(str(x) for x in ficheros):
+        t = _leer(Path(f))
+        if not t:
+            continue
+        def contestar(m):
+            b = m.group(0)
+            r = por_id.get(b.split()[1])
+            if not r:
+                return b
+            letra = r["letra"]
+            pet, acc = peticion_cambio(b, letra), accion_respuesta(b, letra)
+            if pet:
+                out["peticiones"].append(pet)
+            if acc:
+                out["por_aplicar"].append(acc)
+            e = efecto(b, letra)
+            if e["efecto"] == "editar-test" and e["ficheros"]:
+                q = re.search(r"^Question:\s*(.*)$", b, re.M)
+                op = next((x for l, x, _ in opciones(b) if l == letra), "")
+                out["autorizaciones"].append({"pregunta": b.split()[1], "letra": letra, "ficheros": e["ficheros"],
+                                              "motivo": _corta(f"{q.group(1) if q else ''} → {letra}) {op}", 560)})
+            b = b.replace("[OPEN]", "[ANSWERED]", 1)
+            linea = f"Answer: {letra} — {r['como']} {quien} ({hoy})"
+            if re.search(r"^Answer:[ \t]*$", b, re.M):   # [ \t]: no comerse los saltos de línea que separan preguntas
+                return re.sub(r"^Answer:[ \t]*$", linea, b, count=1, flags=re.M)
+            cuerpo = b.rstrip("\n")                       # sin línea Answer: se añade, conservando la separación
+            return cuerpo + "\n" + linea + b[len(cuerpo):] if b[len(cuerpo):] else cuerpo + "\n" + linea + "\n"
+        nuevo = re.sub(r"^## Q-[^\n]*\[OPEN\].*?(?=^## |\Z)", contestar, t, flags=re.M | re.S)
+        if nuevo != t:
+            Path(f).write_text(nuevo, encoding="utf-8")
+    return out
+
+
+def lineas_respuestas(puerta: dict, ficheros: list, texto: str) -> list[str]:
+    """«Qn (Q-id): pregunta → elegida L: texto» de lo que la persona eligió (para el feedback de un rechazo)."""
+    res, _, _ = plan_respuestas(puerta, ficheros, texto, "rechazo")
+    out = []
+    for r in res:
+        b = r["q"].get("bloque") or ""
+        q = re.search(r"^Question:\s*(.*)$", b, re.M)
+        op = next((x for l, x, _ in opciones(b) if l == r["letra"]), "?")
+        out.append(f"Q{r['q']['n']} ({r['q'].get('id', '?')}): {q.group(1) if q else ''} → elegida {r['letra']}: {op}")
+    return out
+
+
+def _efecto_txt(e: dict) -> str:
+    if e.get("efecto") == "editar-test":
+        return "✏️ autoriza editar " + (", ".join(e.get("ficheros") or []) or "tests sin decir cuáles")
+    return {"accion": "🛠 lanza trabajo", "req-change": "📝 abre un cambio de requisitos", "?": "❔ efecto desconocido"}.get(e.get("efecto"), "")
 
 
 def preguntas(ficheros: list[Path]) -> str:
-    """Las preguntas abiertas, numeradas como los botones Q1, Q2…, con la recomendada marcada."""
-    bloques = []
+    """Las preguntas abiertas, numeradas como los botones Q1, Q2…, con la recomendada marcada. Cada una con su frase
+    «Para el cliente» delante y lo técnico plegado en una línea; cada opción dice qué lanza (su efecto); al final, qué
+    lanzará firmar sin tocar nada (club: un plan firmó 21 recomendadas de golpe sin ver que tres lanzaban trabajo)."""
+    bloques, lanza = [], {"accion": [], "req-change": [], "editar-test": [], "ninguno": []}
+    tests_aut = []
     for f in sorted(ficheros):
         for b in re.findall(r"^## Q-[^\n]*\[OPEN\].*?(?=^## |\Z)", _leer(f), flags=re.M | re.S):
+            n = len(bloques) + 1   # mismo número que el botón Q (puerta.sh cuenta todas las abiertas)
             q = re.search(r"^Question:\s*(.*)$", b, re.M)
-            if not q:
-                continue
-            n = len(bloques) + 1
-            lineas = [f"{n}. {q.group(1).strip()}"]
+            tecnica = q.group(1).strip() if q else b.split("\n", 1)[0].lstrip("# ").strip()
+            cli = para_cliente(b)
+            lineas = [f"{n}. {cli}", f"   🔧 Detalle técnico: {_corta(tecnica, 160)}"] if cli else [f"{n}. {tecnica}"]
             for letra, txt, rec in opciones(b):
-                aviso = "  (📝 abre un cambio de requisitos)" if pide_cambio(txt) else ""
-                lineas.append(f"   {letra}) {_MARCA_CAMBIO.sub('', txt).strip()}{'  ⭐ recomendada' if rec else ''}{aviso}")
+                e = efecto(b, letra)
+                marca = _efecto_txt(e)
+                lineas.append(f"   {letra}) {e.get('cliente') or _MARCA_CAMBIO.sub('', txt).strip()}{'  ⭐ recomendada' if rec else ''}"
+                              + (f"  ({marca})" if marca else ""))
+                if rec:
+                    lanza.setdefault(e["efecto"], []).append(f"Q{n}")
+                    if e["efecto"] == "editar-test":
+                        tests_aut += [f"{x} (Q{n})" for x in e.get("ficheros") or []]
+            errs = errores_pregunta(b)
+            if errs:
+                lineas.append("   ⚠️ Pregunta mal escrita: " + "; ".join(errs))
             bloques.append("\n".join(lineas))
     if not bloques:
         return ""
+    partes = [f"🛠 lanza trabajo: {', '.join(lanza['accion'])}" if lanza["accion"] else "",
+              f"📝 abre un cambio de requisitos: {', '.join(lanza['req-change'])}" if lanza["req-change"] else "",
+              f"✏️ autoriza editar tests que ya existían: {', '.join(tests_aut)}" if tests_aut else "",
+              f"sin más efecto: {', '.join(lanza['ninguno'])}" if lanza["ninguno"] else ""]
+    resumen = "👉 Si firmas sin tocar los botones Q, esto lanzará: " + " · ".join(x for x in partes if x) + "."
     return ("\n\n❓ Antes, " + ("una pregunta" if len(bloques) == 1 else f"{len(bloques)} preguntas")
-            + " (la recomendada ya está marcada en los botones Q; si te vale, no toques nada):\n\n" + "\n\n".join(bloques))
+            + " (la recomendada ya está marcada en los botones Q):\n\n" + "\n\n".join(bloques) + "\n\n" + resumen)
 
 
 def normalizar_preguntas(repo: Path) -> int:
@@ -665,9 +991,48 @@ def normalizar_preguntas(repo: Path) -> int:
     return n
 
 
+def _cli_respuestas(argv: list) -> int:
+    """respuestas <validar|distintas|aplicar|lineas> --puerta P --texto T --verbo V [--persona 0|1] [--quien Q --hoy D
+    --salida F] <ficheros questions-*.md…>  (lo usa el notario: el parseo de respuestas vive aquí y no en firmar.sh)"""
+    import argparse
+    ap = argparse.ArgumentParser(prog="hsdd_textos.py respuestas")
+    ap.add_argument("accion", choices=["validar", "distintas", "aplicar", "lineas"])
+    ap.add_argument("--puerta", required=True); ap.add_argument("--texto", default=""); ap.add_argument("--verbo", default="")
+    ap.add_argument("--persona", type=int, default=1); ap.add_argument("--quien", default=""); ap.add_argument("--hoy", default="")
+    ap.add_argument("--salida", default="", help="aplicar: JSON {peticiones, por_aplicar, autorizaciones}")
+    ap.add_argument("ficheros", nargs="*")
+    a = ap.parse_intermixed_args(argv)
+    puerta = json.loads(_leer(Path(a.puerta)) or "{}")
+    fs = [f for f in a.ficheros if not f.endswith("*.md") and Path(f).exists()]
+    if a.accion == "validar":
+        errs = validar_respuestas(puerta, fs, a.texto, a.verbo, bool(a.persona))
+        for e in errs:
+            print(e, file=sys.stderr)
+        return 1 if errs else 0
+    if a.accion == "distintas":   # respuestas distintas de la recomendada: «Q-id = L; …»
+        res, _, modo = plan_respuestas(puerta, fs, a.texto, a.verbo)
+        print("; ".join(f"{r['q']['id']} = {r['letra']}" for r in res if modo == "elegidas" and r["letra"] != r["q"].get("recomendada")))
+        return 0
+    if a.accion == "lineas":
+        print("\n".join(lineas_respuestas(puerta, fs, a.texto)))
+        return 0
+    try:
+        out = aplicar_respuestas(puerta, fs, a.texto, a.verbo, a.quien, a.hoy)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    if a.salida:
+        Path(a.salida).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.salida).write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["normalizar-preguntas"]:   # normalizar-preguntas <repo>
         print(normalizar_preguntas(Path(sys.argv[2]))); sys.exit(0)
+    if sys.argv[1:2] == ["respuestas"]:
+        sys.exit(_cli_respuestas(sys.argv[2:]))
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["puerta"]); ap.add_argument("tipo"); ap.add_argument("repo")

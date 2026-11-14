@@ -27,7 +27,7 @@ const die = (msg) => { console.error(`${PROG}: ${msg}`); throw new Exit(2); };
 const VALUED = new Set(["repo", "junit", "junit-sha", "fase", "out", "report", "mode", "ledger", "state", "max-cycles",
   "req", "ac", "by", "role", "reason", "follow-up", "observed", "pass", "metric", "op", "threshold", "paths", "note",
   "result", "channel", "demo", "requirements", "decisions", "command", "extract", "attach",
-  "category", "quote", "evidence", "verifier", "counter", "challenge", "challenges", "literal", "code", "file", "line", "base"]);
+  "category", "quote", "evidence", "verifier", "counter", "challenge", "challenges", "literal", "code", "file", "line", "base", "question", "gate"]);
 const MULTI = new Set(["junit", "paths", "attach", "evidence"]);
 const FLAGS = new Set(["json", "md", "needs", "quotes", "captures", "reset", "no-out", "help", "remeasure", "allow-dirty", "open"]);
 
@@ -250,7 +250,7 @@ function cmdRecord(o) {
   if (o._.length) usage(`unexpected argument ${o._[0]}`);
   const root = rootOf(o);
   // A floor exception names no requirement: it works in a project without requirements/REQUIREMENTS.md.
-  const reqs = type === "floor-exception" && !existsSync(path.resolve(root, o.requirements || "requirements/REQUIREMENTS.md")) ? [] : readReqs(root, o);
+  const reqs = (type === "floor-exception" || type === "test-edit") && !existsSync(path.resolve(root, o.requirements || "requirements/REQUIREMENTS.md")) ? [] : readReqs(root, o);
   const g = gitContext(root);
   const rec = { type, at: new Date().toISOString(), by: o.by, role: o.role, head: g.head };
   const bool = (v, name) => {
@@ -270,6 +270,10 @@ function cmdRecord(o) {
     // ledger shows it as dismissed with who, role and reason.
     const ch = readChallenges(challengesPath(root, o)).challenges.find((c) => c.id === String(o.challenge || "").toUpperCase());
     Object.assign(rec, { challenge: o.challenge ? String(o.challenge).toUpperCase() : undefined, reason: o.reason, ...(ch ? { req: ch.req, ac: ch.ac } : {}) });
+  } else if (type === "test-edit") {
+    if (o.req !== undefined) usage("a test-edit names files, not a requirement: drop --req");
+    const files = [...new Set(o.paths.map((f) => String(f).replace(/\\/g, "/").replace(/^\.\//, "")))];
+    Object.assign(rec, { files, question: o.question, gate: o.gate, reason: o.reason });
   } else if (type === "floor-exception") {
     // A person accepts one finding of `sdd lint --floor` (code, file, exact line text) against one base commit; the
     // finding comes back when the line changes or the base moves.
@@ -292,7 +296,7 @@ function cmdRecord(o) {
   for (const k of Object.keys(rec)) if (rec[k] === undefined) delete rec[k];
   const errors = validateRecord(rec, reqs, { challenges: readChallenges(challengesPath(root, o)).challenges, records: readDecisions(decisionsPath(root, o)).records });
   if (o.attach.length) {
-    if (["waiver", "challenge-dismissal", "literal-exception", "floor-exception"].includes(type)) errors.push(`a ${type} records no observation: --attach is for demo, inspection, measurement and fase-acceptance`);
+    if (["waiver", "challenge-dismissal", "literal-exception", "floor-exception", "test-edit"].includes(type)) errors.push(`a ${type} records no observation: --attach is for demo, inspection, measurement and fase-acceptance`);
     else {
       const att = attachFiles(root, o.attach);
       errors.push(...att.errors);
@@ -302,7 +306,7 @@ function cmdRecord(o) {
   if (errors.length) { for (const e of errors) console.error(`${PROG}: accept record ${type}: ${e}`); return 2; }
   // An observation is anchored to HEAD: made on uncommitted code it would be stale from birth (a waiver, a dismissal or
   // a literal exception observes nothing: the last one is bound to the requirement's text by reqHash).
-  if (!["waiver", "challenge-dismissal", "literal-exception", "floor-exception"].includes(type)) {
+  if (!["waiver", "challenge-dismissal", "literal-exception", "floor-exception", "test-edit"].includes(type)) {
     const d = uncommitted(root, g, rec.paths);
     if (d) {
       if (!o["allow-dirty"]) { console.error(`${PROG}: accept record ${type}: ${d}: commit first, or pass --allow-dirty to record it with dirty: true`); return 2; }
@@ -311,6 +315,7 @@ function cmdRecord(o) {
   }
   const { file, n } = appendRecord(root, o, rec);
   if (o.json) out(JSON.stringify({ file, line: n, record: rec }, null, 2));
+  else if (type === "test-edit") out(`recorded test-edit ${rec.files.join(", ")} (${rec.question}) at ${file}:${n}`);
   else if (type === "floor-exception") out(`recorded floor-exception ${rec.code} ${rec.file} "${String(rec.text).trim()}" (base ${rec.base.slice(0, 7)}) at ${file}:${n}`);
   else out(`recorded ${type} ${rec.challenge ? `${rec.challenge} (${rec.req} AC${rec.ac})` : rec.literal !== undefined ? `${rec.req} AC${rec.ac} "${rec.literal}"` : rec.req || `FASE ${rec.fase}`} at ${file}:${n}`);
   return 0;

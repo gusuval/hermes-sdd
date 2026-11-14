@@ -51,6 +51,35 @@ o=$(python3 "$RV" revisar "$R" ruta); [ "$(jq '.avisos | length' <<< "$o")" = 0 
 printf '%s\n' '- stack: web vite' > "$R/AGENTS.md"; mkdir -p "$R/.sdd/hermes"; echo '{"motivo":"no tiene pantallas"}' > "$R/.sdd/hermes/ruta.json"
 o=$(python3 "$RV" revisar "$R" ruta); jq -e '.avisos[0].codigo == "ruta-contradice-stack"' <<< "$o" >/dev/null && ok "ruta: «no tiene pantallas» en un stack web" || bad "ruta web: $o"
 
+# Tras una entrega, el plan se mide por lo que añade el cambio (club: «111 tareas para 3 requisitos» contaba las 108 de
+# las entregas anteriores), con mínimos absolutos
+C="$T/cambio"; mkdir -p "$C/requirements" "$C/plan/fases" "$C/task"; cd "$C"
+git init -q; git config user.email t@t; git config user.name t; git config commit.gpgsign false
+for i in 1 2 3 4 5 6; do printf '### REQ-F-00%s: R%s\n- **Needs:** N-001\n  - GIVEN a WHEN b THEN c\n' $i $i; done > requirements/REQUIREMENTS.md
+for f in 0 1 2 3 4; do printf '# FASE-%s\n' $f > plan/fases/FASE-$f-X.md
+  for k in $(seq 1 20); do printf -- '- [x] TASK-F%s-%03d hecho\n' $f $k; done > task/TASK-FASE-$f.md; done
+git add -A; git commit -qm v1; git tag entrega-1
+printf '### REQ-F-007: Nuevo\n- **Needs:** N-002\n  - GIVEN a WHEN b THEN c\n' >> requirements/REQUIREMENTS.md
+printf '# FASE-5\n' > plan/fases/FASE-5-NUEVO.md; printf -- '- [ ] TASK-F5-001 a\n- [ ] TASK-F5-002 b\n- [ ] TASK-F5-003 c\n' > task/TASK-FASE-5.md
+git add -A; git commit -qm cambio
+o=$(python3 "$RV" revisar "$C" plan)
+jq -e '[.avisos[].codigo] | (index("tareas-de-mas") | not) and (index("fases-de-mas") | not)' <<< "$o" >/dev/null \
+  && ok "plan tras una entrega: 1 FASE y 3 tareas nuevas para 1 requisito nuevo no son «de más» (no cuenta las 100 anteriores)" || bad "delta: $o"
+for k in $(seq 4 12); do printf -- '- [ ] TASK-F5-%03d x\n' $k; done >> task/TASK-FASE-5.md; git commit -qam mas
+o=$(python3 "$RV" revisar "$C" plan)
+jq -e '.avisos[] | select(.codigo == "tareas-de-mas") | .texto | test("^12 tareas en este cambio \\(desde entrega-1\\) para 1 requisito funcional nuevo:")' <<< "$o" >/dev/null \
+  && ok "…y 12 tareas nuevas para 1 requisito nuevo sí, dicho como «en este cambio»" || bad "delta 12: $o"
+# un aviso leve que la persona ya vio en una puerta firmada no se repite; uno grave sí
+mkdir -p .sdd/hermes/puertas; jq -n --argjson a "$(jq -c '.avisos' <<< "$o")" '{encargado: {avisos: $a}}' > .sdd/hermes/puertas/g1.json
+echo '{"puerta":"g1"}' > .sdd/hermes/puertas.jsonl
+o=$(python3 "$RV" revisar "$C" plan)
+jq -e '(.avisos | length) == 0 and .ya_vistos == 1' <<< "$o" >/dev/null && ok "un aviso leve ya visto en una puerta firmada se calla (y se cuenta)" || bad "silenciar: $o"
+# si la comprobación de fidelidad falló, la puerta lo dice como grave (antes valía el JSON de la vez anterior)
+echo '{"graves":1,"error":"hsdd_fidelidad falló"}' > .sdd/hermes/fidelidad-3.json
+o=$(python3 "$RV" revisar "$C" fase --fase 3)
+jq -e '.graves >= 1 and any(.avisos[]; .codigo == "fidelidad-sin-comprobar")' <<< "$o" >/dev/null && ok "fidelidad que no se pudo comprobar: aviso grave" || bad "fidelidad error: $o"
+cd "$ROOT"
+
 # Jev no aprueba solo una puerta con un aviso grave del encargado
 o=$(python3 - "$ROOT/plugin/hermes-sdd/hsdd_nucleo.py" <<'PY'
 import importlib.util, sys
