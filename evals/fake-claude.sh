@@ -2,6 +2,7 @@
 # Sustituto determinista de `claude -p` para pruebas: su comportamiento lo fija FAKE_MODE (vía fichero, porque
 # el supervisor limpia el entorno): ok | lento | cuota | error | sinjson
 MODE=$(cat "${TMPDIR:-/tmp}/fake-claude-mode" 2>/dev/null || echo ok)
+printf '%s\n' "$@" > "${TMPDIR:-/tmp}/fake-claude-args"   # con qué argumentos se lanzó (pruebas del supervisor)
 case "$MODE" in
   ok)      echo '{"type":"result","is_error":false,"result":"hecho","session_id":"s-1","total_cost_usd":0.01,"num_turns":3}' ;;
   lento)   sleep 300; echo '{"is_error":false,"result":"tarde"}' ;;

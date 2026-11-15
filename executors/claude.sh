@@ -77,7 +77,13 @@ AJUSTES=$(jq -nc --arg sb "${SDD_SANDBOX:-0}" --arg os "$(uname -s)" '
         filesystem: {denyWrite: ["./.sdd/hermes/decisiones", "./.sdd/hermes/puertas", "./wiki"],
                      allowWrite: ["~/.npm", "~/Library/Caches/ms-playwright", "~/.cache"]}}
         + (if $os == "Darwin" then {failIfUnavailable: true} else {} end))} else {} end)')
-ARGS=(-p "$PROMPT" --output-format json --plugin-dir "$ROOT/metodo" --settings "$AJUSTES")
+# Modo de permisos: en `claude -p` nadie contesta una confirmación, así que lo que la pida se deniega (montevideo,
+# 14/11/2026: el diseñador UX no podía escribir ux/ ni implementar ejecutar npm). Con sandbox, acceptEdits (el Bash ya
+# lo autoriza el sandbox); sin sandbox, bypassPermissions. En los dos siguen valiendo los `deny` de arriba y los hooks
+# de guardia del método (probado). --add-dir: las skills leen metodo/references, que está fuera del repo.
+[ "${SDD_SANDBOX:-0}" = 1 ] && MODO=acceptEdits || MODO=bypassPermissions
+ARGS=(-p "$PROMPT" --output-format json --plugin-dir "$ROOT/metodo" --settings "$AJUSTES"
+      --permission-mode "$MODO" --add-dir "$ROOT/metodo")
 [ -n "$MODELO" ] && ARGS+=(--model "$MODELO")
 cd "$REPO"
 env -i HOME="$HOME" USER="$USER" LOGNAME="${LOGNAME:-$USER}" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-es_ES.UTF-8}" \

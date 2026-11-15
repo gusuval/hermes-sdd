@@ -16,6 +16,15 @@ modo cuota; o=$(sup); [ "$(echo "$o" | jq -r .outcome)" = scheduled ] && [ "$(ec
 modo error; o=$(sup); [ "$(echo "$o" | jq -r .outcome)" = failed ] && ok "error → failed" || bad "error: $o"
 modo sinjson; o=$(sup); [ "$(echo "$o" | jq -r .outcome)" = failed ] && echo "$o" | grep -q "no auth" && ok "sin JSON → failed con el motivo" || bad "sinjson: $o"
 [ ! -d "$R/.sdd/hermes/lock" ] && ok "libera el candado al terminar" || bad "candado sin liberar"
+# Modo de permisos: en `claude -p` nadie contesta una confirmación. Con sandbox, acceptEdits; sin él, bypassPermissions.
+# En los dos, el método (metodo/references) se puede leer aunque esté fuera del repo.
+args() { tr '\n' ' ' < "$T/fake-claude-args"; }
+modo ok; SDD_SANDBOX=1 sup >/dev/null; a=$(args)
+echo "$a" | grep -q -- "--permission-mode acceptEdits" && echo "$a" | grep -q -- "--add-dir $ROOT/metodo" \
+  && ok "con sandbox: acceptEdits y el método legible" || bad "sandbox: $a"
+modo ok; SDD_SANDBOX=0 sup >/dev/null; a=$(args)
+echo "$a" | grep -q -- "--permission-mode bypassPermissions" && echo "$a" | grep -q '"deny":\["Edit(~/.hermes/\*\*)"' \
+  && ok "sin sandbox: bypassPermissions y siguen los deny" || bad "sin sandbox: $a"
 
 # Candado: con una ejecución viva, la segunda sale "busy"
 modo lento; bash "$ROOT/executors/claude.sh" "$R" larga "x" >/dev/null & S1=$!
