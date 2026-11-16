@@ -332,8 +332,9 @@ if ! hecho autorizado; then
     done < <(jq -c '.autorizaciones[]' "$RJ")
     t=$(mktemp); jq --slurpfile r "$RJ" '.autorizaciones = [$r[0].autorizaciones[] | {pregunta, ficheros}]' "$ACTA" > "$t" && mv "$t" "$ACTA"
     git add acceptance/decisions.jsonl
+    # Question:, no Refs: las preguntas (Q-acceptance-002) no son ids de especificación y el hook commit-msg las rechaza
     git diff --cached --quiet || git commit -q -m "docs(acceptance): test edit authorized by $NOMBRE" \
-      --trailer "Refs: $(jq -r '[.autorizaciones[].pregunta] | join(", ")' "$RJ")" --trailer "Gate-Id: $GATE"
+      --trailer "Question: $(jq -r '[.autorizaciones[].pregunta] | join(", ")' "$RJ")" --trailer "Gate-Id: $GATE"
   fi
   marcar autorizado
 fi
