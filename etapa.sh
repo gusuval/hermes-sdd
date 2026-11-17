@@ -500,6 +500,12 @@ PY
   cambio)
     INT=$(cat .sdd/hermes/cambio-actual 2>/dev/null) || falla "no hay ningún cambio en curso (.sdd/hermes/cambio-actual)"
     claude_etapa req-change "/sdd-req-change --batch --cascade=manual --file intent/$INT.md — $ARNES Apply this change request to requirements/ as the next version (Version +1, Status: Review)."
+    # Un cambio sube la versión: si la que queda ya está aprobada (su tag existe), la puerta no se podría firmar
+    # (practica-todo-2, INT-001: el ejecutor replay no trae la etapa «cambio», los requisitos siguieron en 1.0 y el
+    # notario chocó con «el tag requirements-v1.0 ya existe en otro commit» después de que la persona aprobara)
+    VREQ=$(sed -n 's/^> \*\*Version:\*\* *//p' requirements/REQUIREMENTS.md 2>/dev/null | head -1)
+    ! git rev-parse -q --verify "refs/tags/requirements-v${VREQ:-1.0}" >/dev/null ||
+      falla "el cambio $INT no subió la versión de los requisitos (sigue en ${VREQ:-1.0}, ya aprobada): no se abre la puerta"
     requisitos_legibles req-change sdd-req-change
     ejemplos_coherentes req-change sdd-req-change
     P=$(puerta requisitos) || falla "no se pudo abrir la puerta de requisitos"

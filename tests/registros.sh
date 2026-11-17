@@ -27,4 +27,16 @@ o=$(etapa borra)
 [ "$(echo "$o" | jq -r .outcome)" = failed ] && echo "$o" | jq -r .reason | grep -q "borradas o cambiadas" &&
   [ -n "$(git -C "$R" status --porcelain -- "$D")" ] && [ "$(git -C "$R" rev-parse HEAD)" = "$h" ] &&
   ok "registro reescrito → la etapa falla y no se commitea" || bad "borra: $o"
+git -C "$R" checkout -q -- "$D"
+
+# Un cambio de requisitos que no sube la versión: la etapa falla y no abre una puerta que el notario no podría firmar
+# (practica-todo-2, INT-001: replay no trae la etapa «cambio»; la persona aprobó y chocó con el tag requirements-v1.0)
+V=$(sed -n 's/^> \*\*Version:\*\* *//p' "$R/requirements/REQUIREMENTS.md" | head -1)
+git -C "$R" tag -f "requirements-v${V:-1.0}" >/dev/null
+mkdir -p "$R/intent" "$R/.sdd/hermes"; printf '# INT-001\n\n> otro cambio\n' > "$R/intent/INT-001.md"
+git -C "$R" add intent && git -C "$R" commit -qm "docs(intent): INT-001"; echo INT-001 > "$R/.sdd/hermes/cambio-actual"
+o=$(bash "$ROOT/etapa.sh" "$R" cambio 2>/dev/null | tail -1)
+[ "$(echo "$o" | jq -r .outcome)" = failed ] && echo "$o" | jq -r .reason | grep -q "no subió la versión de los requisitos" &&
+  ! ls "$R"/.sdd/hermes/puertas/*.json 2>/dev/null | xargs -r grep -l '"tipo": "requisitos"' | grep -q . &&
+  ok "cambio sin subir la versión de los requisitos → la etapa falla sin abrir puerta" || bad "cambio sin versión: $o"
 exit $fail
