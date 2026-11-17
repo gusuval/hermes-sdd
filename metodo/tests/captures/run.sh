@@ -200,6 +200,17 @@ printf '{"criterio":"REQ-F-001-AC2","test":"WF-001 REQ-F-001 AC6 recorrido","ve"
 run accept --json --no-out
 expect "sidecar: taken by the journey that does not cite AC2 → not counted" "$(js "($C)(2).visual + '|' + ($C)(2).unbound_captures[0].reason.slice(0,24)")" "missing|taken by the test \"WF-00"
 rm -f "$repo/evidencias/FASE-1/REQ-F-001-AC2.json"
+# Two criteria whose screens are the same pixels share the bytes of their captures: each image keeps its own sidecar
+# (calendario, FASE-0: AC-001-01, AC-001-05 and AC-009-04 capture the same clean grid; the last sidecar with those bytes
+# won and AC-001-01 counted as taken for AC-009-04 → unshown, and the gate failed)
+H=$(sha256sum "$repo/test-results/b/REQ-F-001-AC1-9f8e.png" | cut -c1-64)
+cp "$repo/test-results/b/REQ-F-001-AC1-9f8e.png" "$repo/evidencias/FASE-1/REQ-F-001-AC1.png"
+cp "$repo/test-results/b/REQ-F-001-AC1-9f8e.png" "$repo/evidencias/FASE-1/zz-REQ-F-001-AC6.png"
+printf '{"criterio":"REQ-F-001-AC1","test":"REQ-F-001 AC1 se apunta y lo ve","sha256":"sha256:%s"}' "$H" > "$repo/evidencias/FASE-1/REQ-F-001-AC1.json"
+printf '{"criterio":"REQ-F-001-AC6","test":"WF-001 REQ-F-001 AC6 recorrido","sha256":"sha256:%s"}' "$H" > "$repo/evidencias/FASE-1/zz-REQ-F-001-AC6.json"
+run accept --json --no-out
+expect "same bytes, two sidecars: AC1 is shown by its test's image and by its own capture" "$(js "($C)(1).visual + '|' + ($C)(1).shown_by.sort().join()")" "shown|evidencias/FASE-1/REQ-F-001-AC1.png,test-results/b/REQ-F-001-AC1-9f8e.png"
+rm -f "$repo/evidencias/FASE-1/REQ-F-001-AC1."{png,json} "$repo/evidencias/FASE-1/zz-REQ-F-001-AC6."{png,json}
 # A capture named after a criterion that nobody attached (minitest) keeps counting by its name
 printf 'png-ac4' > "$repo/evidencias/FASE-1/REQ-F-001-AC1-extra.png"
 run accept --json --no-out

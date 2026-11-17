@@ -360,7 +360,8 @@ export function evidenceSettings(root) {
 
 /** The capture helper's sidecars (`captura(page, info, id, { ve })` writes AC-001-02.json next to AC-001-02.png):
  *  { criterio, test, titulo, ve[], url, imagen, sha256 } per JSON file under the evidence dir, indexed by the image's
- *  sha256 and by its path without extension. A JUnit attachment (a copy of the PNG) finds its sidecar by sha256. */
+ *  sha256 (a list: two criteria whose screens are the same pixels share bytes) and by its path without extension. A
+ *  JUnit attachment (a copy of the PNG) finds its sidecar by sha256. */
 export function scanSidecars(root, dir) {
   const bySha = new Map(), byStem = new Map();
   const walk = (d) => {
@@ -375,7 +376,7 @@ export function scanSidecars(root, dir) {
       if (!j || typeof j !== "object" || (!j.test && !j.criterio)) continue;
       const sc = { file: toPosix(path.relative(root, p)), criterio: j.criterio ? String(j.criterio) : null, test: j.test ? String(j.test) : null,
         titulo: j.titulo ? String(j.titulo) : null, ve: Array.isArray(j.ve) ? j.ve.map(String) : [], url: j.url || null, sha256: j.sha256 || null };
-      if (sc.sha256) bySha.set(sc.sha256, sc);
+      if (sc.sha256) bySha.set(sc.sha256, [...(bySha.get(sc.sha256) || []), sc]);
       byStem.set(toPosix(path.relative(root, p)).replace(/\.json$/i, ""), sc);
     }
   };
@@ -686,12 +687,22 @@ export function evaluate(opts) {
     .filter((f) => f.kind === "image" && (scen.some((s) => nameHasId(f.rel, s)) || nameHasId(f.rel, `${reqId}-AC${n}`)))
     .map((f) => { const fr = fileFresh(f); return { kind: "capture", ref: f.rel, fresh: fr.ok, ...(fr.why ? { stale_reason: fr.why } : {}), attachments: [describeFile(root, f.abs, files)] }; });
   const sidecars = visual === "off" ? { bySha: new Map(), byStem: new Map() } : scanSidecars(root, settings.dir);
-  const sidecarOf = (a) => (a.sha256 && sidecars.bySha.get(a.sha256)) || sidecars.byStem.get(String(a.path).replace(/\.[^./]+$/, "")) || null;
+  // Its own sidecar (same path) first; by sha256, the one whose criterion the image's name carries, else the one taken
+  // by `test` (the test that attached it). Before, the last sidecar with those bytes won: calendario, FASE-0: AC-001-01,
+  // AC-001-05 and AC-009-04 capture the same clean grid, and AC-001-01 counted as taken for AC-009-04 (unshown).
+  const sidecarOf = (a, test) => {
+    const own = sidecars.byStem.get(String(a.path).replace(/\.[^./]+$/, ""));
+    if (own) return own;
+    const list = (a.sha256 && sidecars.bySha.get(a.sha256)) || [];
+    if (list.length <= 1) return list[0] || null;
+    const base = path.basename(String(a.path));
+    return list.find((sc) => sc.criterio && nameHasId(base, sc.criterio)) || (test && list.find((sc) => sameTest(test, sc))) || list[0];
+  };
   /** Does image `a`, attached to a test bound to the criterion (ids: its scenario ids and REQ-F-NNN-ACn), show it? The
    *  helper's sidecar says which criterion it was taken for; else a name that carries a criterion id must carry one of
    *  these; a generic name (shot-1.png, test-finished-1.png) shows only the criterion of a test bound to nothing else. */
-  const imageShows = (a, ids, binds) => {
-    const sc = sidecarOf(a);
+  const imageShows = (a, ids, binds, test) => {
+    const sc = sidecarOf(a, test);
     if (sc?.criterio) return ids.some((id) => nameHasId(sc.criterio, id)) || `its sidecar says it was taken for ${sc.criterio}`;
     if (CRITERION_NAME.test(path.basename(String(a.path)))) return ids.some((id) => nameHasId(a.path, id)) || "it is named after another criterion";
     return binds <= 1 || `a generic name in a test bound to ${binds} criteria`;
@@ -856,7 +867,7 @@ export function evaluate(opts) {
           const binds = bindingsOf.get(caseOf.get(t))?.size ?? 1;
           for (const a of t.attachments || []) {
             if (a.kind !== "image" || !a.present) continue;
-            const why = imageShows(a, ids, binds);
+            const why = imageShows(a, ids, binds, t.name);
             if (why === true) shownBy.push(a.path); else notCounted.push({ ref: a.path, test: t.name, reason: why });
           }
         }
